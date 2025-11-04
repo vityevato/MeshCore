@@ -225,6 +225,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.multi_acks, sizeof(_prefs.multi_acks));                   // 77
     file.read(pad, 2);                                                                     // 78
     file.read((uint8_t *)&_prefs.ble_pin, sizeof(_prefs.ble_pin));                         // 80
+    file.read((uint8_t *)&_prefs.enable_wakeup, sizeof(_prefs.enable_wakeup));             // 84
 
     file.close();
   }
@@ -256,6 +257,7 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.multi_acks, sizeof(_prefs.multi_acks));                   // 77
     file.write(pad, 2);                                                                     // 78
     file.write((uint8_t *)&_prefs.ble_pin, sizeof(_prefs.ble_pin));                         // 80
+    file.write((uint8_t *)&_prefs.enable_wakeup, sizeof(_prefs.enable_wakeup));             // 84
 
     file.close();
   }
@@ -381,6 +383,68 @@ void DataStore::saveChannels(DataStoreHost* host) {
 
       if (!success) break; // write failed
       channel_idx++;
+    }
+    file.close();
+  }
+}
+
+void DataStore::loadMessages(DataStoreHost* host) {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  if (_fs->exists("/messages")) {
+    File file = _fs->open("/messages");
+#elif defined(RP2040_PLATFORM)
+  if (_fs->exists("/messages")) {
+    File file = _fs->open("/messages", "r");
+#else
+  if (_fs->exists("/messages")) {
+    File file = _fs->open("/messages", "r", false);
+#endif
+    if (file) {
+      bool full = false;
+      while (!full) {
+        MessageFrame frame;
+        
+        bool success = (file.read(&frame.len, 1) == 1);
+        if (success && frame.len > 0 && frame.len <= 172) {
+          success = (file.read(frame.buf, frame.len) == frame.len);
+        } else {
+          success = false;
+        }
+        
+        if (!success) break; // EOF or read error
+        
+        if (!host->onMessageLoaded(frame)) full = true;
+      }
+      file.close();
+    }
+  }
+}
+
+void DataStore::saveMessages(DataStoreHost* host) {
+  uint32_t msg_count = host->getMessageCount();
+  
+  // Don't write empty file to reduce flash wear
+  if (msg_count == 0) {
+    // Remove existing file if present
+    if (_fs->exists("/messages")) {
+      _fs->remove("/messages");
+    }
+    return;
+  }
+  
+  File file = openWrite(_fs, "/messages");
+  if (file) {
+    uint32_t idx = 0;
+    MessageFrame frame;
+    
+    while (host->getMessageForSave(idx, frame)) {
+      if (frame.len > 0 && frame.len <= 172) {
+        bool success = (file.write(&frame.len, 1) == 1);
+        success = success && (file.write(frame.buf, frame.len) == frame.len);
+        
+        if (!success) break; // write failed
+      }
+      idx++;
     }
     file.close();
   }

@@ -5,12 +5,21 @@
 #include <helpers/ChannelDetails.h>
 #include "NodePrefs.h"
 
+// Forward declaration for Frame structure
+struct MessageFrame {
+  uint8_t len;
+  uint8_t buf[172]; // MAX_FRAME_SIZE
+};
+
 class DataStoreHost {
 public:
   virtual bool onContactLoaded(const ContactInfo& contact) =0;
   virtual bool getContactForSave(uint32_t idx, ContactInfo& contact) =0;
   virtual bool onChannelLoaded(uint8_t channel_idx, const ChannelDetails& ch) =0;
   virtual bool getChannelForSave(uint8_t channel_idx, ChannelDetails& ch) =0;
+  virtual bool onMessageLoaded(const MessageFrame& frame) =0;
+  virtual bool getMessageForSave(uint32_t idx, MessageFrame& frame) =0;
+  virtual uint32_t getMessageCount() const =0;
 };
 
 class DataStore {
@@ -39,6 +48,8 @@ public:
   void saveContacts(DataStoreHost* host);
   void loadChannels(DataStoreHost* host);
   void saveChannels(DataStoreHost* host);
+  void loadMessages(DataStoreHost* host);
+  void saveMessages(DataStoreHost* host);
   void migrateToSecondaryFS();
   uint8_t getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_buf[]);
   bool putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], uint8_t len);
