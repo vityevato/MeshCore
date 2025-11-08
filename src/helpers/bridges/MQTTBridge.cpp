@@ -201,12 +201,32 @@ void MQTTBridge::onMqttMessage(char *topic, uint8_t *payload, unsigned int lengt
   Serial.print(getLogDateTime());
   Serial.printf(": MQTT RX, len=%d, type=%d\n", payload_size, packet->getPayloadType());
 
-  // Forward to mesh network
-  handleReceivedPacket(packet);
+  onPacketReceived(packet);
 }
 
-void MQTTBridge::onPacketTransmitted(mesh::Packet *packet)
+void MQTTBridge::sendPacket(mesh::Packet *packet)
 {
+  // Guard against uninitialized state
+  if (_initialized == false)
+  {
+    return;
+  }
+
+  // First validate the packet pointer
+  if (!packet)
+  {
+    Serial.println("MQTT: TX invalid packet pointer");
+    return;
+  }
+
+  // Don't send zero-hop packets (intended only for direct neighbors)
+  // MQTT bridge connects remote zones via internet, so zero-hop packets
+  // (which are meant for physical neighbors only) should not be forwarded
+  if (packet->isRouteDirect() && packet->path_len == 0)
+  {
+    return;
+  }
+
   if (!_mqtt_client.connected())
   {
     return;
@@ -250,16 +270,10 @@ void MQTTBridge::onPacketTransmitted(mesh::Packet *packet)
   }
 }
 
-void MQTTBridge::sendPacket(mesh::Packet *packet)
-{
-  // Forward to onPacketTransmitted for actual MQTT publishing
-  onPacketTransmitted(packet);
-}
-
 void MQTTBridge::onPacketReceived(mesh::Packet *packet)
 {
-  // This is called by handleReceivedPacket() after duplicate check
-  // Packet is already queued for mesh processing
+  // Delegate to base class for duplicate check and queueing (consistent with RS232Bridge)
+  handleReceivedPacket(packet);
 }
 
 #endif // WITH_MQTT_BRIDGE

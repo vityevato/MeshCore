@@ -153,14 +153,9 @@ public:
   void sendPacket(mesh::Packet *packet) override;
 
   /**
-   * Called when a packet needs to be transmitted via MQTT
-   */
-  void onPacketTransmitted(mesh::Packet *packet);
-
-  /**
    * Called when a valid packet has been received from MQTT
    */
-  void onPacketReceived(mesh::Packet *packet);
+  void onPacketReceived(mesh::Packet *packet) override;
 };
 
 #endif // WITH_MQTT_BRIDGE
