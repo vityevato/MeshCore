@@ -659,6 +659,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
       , bridge(&_prefs, WITH_RS232_BRIDGE, _mgr, &rtc)
 #endif
 #if defined(WITH_ESPNOW_BRIDGE)
+      , bridge(_mgr, &rtc)
+#endif
+#if defined(WITH_MQTT_BRIDGE)
       , bridge(&_prefs, _mgr, &rtc)
 #endif
 {
