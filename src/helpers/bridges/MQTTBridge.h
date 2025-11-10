@@ -69,7 +69,7 @@ public:
  * - Define WITH_MQTT_BRIDGE to enable this bridge
  * - All MQTT parameters (broker, port, topic, credentials) must be configured via CLI
  * - WiFi credentials must be configured via CLI
- * - See docs/cli_commands.md for available commands
+ * - See docs/mqtt_cli_commands.md for available commands
  *
  * TLS Configuration:
  * - Define WITH_MQTT_TLS to enable TLS/SSL encryption
@@ -79,7 +79,7 @@ public:
  * Runtime TLS Configuration (via CLI):
  * - CA certificate can be stored in file system:
  *   - /mqtt_ca.crt - CA certificate for server verification
- * - Use CLI commands to manage certificate (see docs/cli_commands.md)
+ * - Use CLI commands to manage certificate (see docs/mqtt_cli_commands.md)
  * - Runtime certificate takes precedence over compile-time define
  *
  * Note: MQTT_MAX_PACKET_SIZE is automatically set to 512 bytes to support full-size
