@@ -86,7 +86,49 @@ public:
  * mesh packets (up to 260 bytes) with safety margin for future protocol versions.
  */
 class MQTTBridge : public BridgeBase {
+public:
+
+  /**
+   * Constructs an MQTTBridge instance
+   */
+  MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc);
+
+  /**
+   * Initializes the MQTT bridge
+   * - Connects to WiFi (if not already connected)
+   * - Generates client ID if needed
+   * - Connects to MQTT broker
+   * - Subscribes to bridge topic
+   */
+  void begin() override;
+
+  /**
+   * Stops the MQTT bridge
+   * - Disconnects from MQTT broker
+   * - Disconnects from WiFi
+   */
+  void end() override;
+
+  /**
+   * Main loop handler
+   * - Maintains MQTT connection
+   * - Processes incoming messages
+   * - Handles reconnection
+   */
+  void loop() override;
+
+  /**
+   * Sends a packet via MQTT bridge
+   */
+  void sendPacket(mesh::Packet *packet) override;
+
+  /**
+   * Called when a valid packet has been received from MQTT
+   */
+  void onPacketReceived(mesh::Packet *packet) override;
+
 private:
+
 #ifdef WITH_MQTT_TLS
   WiFiClientSecureWithSNI _wifi_client;
   
@@ -157,46 +199,6 @@ private:
    */
   bool loadCertFromFile(const char* filename, char* buffer, size_t max_size);
 #endif
-
-public:
-  /**
-   * Constructs an MQTTBridge instance
-   */
-  MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc);
-
-  /**
-   * Initializes the MQTT bridge
-   * - Connects to WiFi (if not already connected)
-   * - Generates client ID if needed
-   * - Connects to MQTT broker
-   * - Subscribes to bridge topic
-   */
-  void begin() override;
-
-  /**
-   * Stops the MQTT bridge
-   * - Disconnects from MQTT broker
-   * - Disconnects from WiFi
-   */
-  void end() override;
-
-  /**
-   * Main loop handler
-   * - Maintains MQTT connection
-   * - Processes incoming messages
-   * - Handles reconnection
-   */
-  void loop() override;
-
-  /**
-   * Sends a packet via MQTT bridge
-   */
-  void sendPacket(mesh::Packet *packet) override;
-
-  /**
-   * Called when a valid packet has been received from MQTT
-   */
-  void onPacketReceived(mesh::Packet *packet) override;
 };
 
 #endif // WITH_MQTT_BRIDGE

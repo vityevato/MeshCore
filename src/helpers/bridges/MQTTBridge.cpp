@@ -23,127 +23,13 @@
 
 MQTTBridge *MQTTBridge::_instance = nullptr;
 
+// Public methods
+
 MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc)
     : BridgeBase(prefs, mgr, rtc), _mqtt_client(_wifi_client) {
   _instance = this;
   _mqtt_client.setCallback(mqttCallback);
 }
-
-void MQTTBridge::generateClientId() {
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
-  snprintf(_client_id_buf, sizeof(_client_id_buf), "meshcore-%02X%02X%02X", mac[3], mac[4], mac[5]);
-}
-
-bool MQTTBridge::reconnectWiFi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return true;
-  }
-
-  unsigned long now = millis();
-  if (now - _last_wifi_reconnect_attempt < WIFI_RECONNECT_INTERVAL) {
-    return false;
-  }
-
-  _last_wifi_reconnect_attempt = now;
-
-  // Get WiFi credentials from prefs
-  const char *ssid = _prefs->bridge_wifi_ssid;
-  const char *password = _prefs->bridge_wifi_password;
-
-  if (ssid[0] == 0) {
-    BRIDGE_DEBUG_PRINTLN("WiFi not configured!\n");
-    return false;
-  }
-
-  BRIDGE_DEBUG_PRINTLN("WiFi disconnected, attempting reconnection\n");
-  WiFi.disconnect();
-  WiFi.begin(ssid, password);
-
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 3000) {
-    delay(500);
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    BRIDGE_DEBUG_PRINTLN("WiFi reconnected, IP: %s\n", WiFi.localIP().toString().c_str());
-    return true;
-  } else {
-    BRIDGE_DEBUG_PRINTLN("WiFi reconnection failed!\n");
-    return false;
-  }
-}
-
-#ifdef WITH_MQTT_TLS
-bool MQTTBridge::loadCertFromFile(const char* filename, char* buffer, size_t max_size) {
-  if (!FS_IMPL.exists(filename)) {
-    return false;
-  }
-
-  auto file = FS_IMPL.open(filename, "r");
-  if (!file) {
-    BRIDGE_DEBUG_PRINTLN("Failed to open certificate file: %s\n", filename);
-    return false;
-  }
-
-  size_t file_size = file.size();
-  if (file_size == 0 || file_size >= max_size) {
-    BRIDGE_DEBUG_PRINTLN("Certificate file size invalid: %s (%d bytes)\n", filename, file_size);
-    file.close();
-    return false;
-  }
-
-  size_t bytes_read = file.readBytes(buffer, file_size);
-  buffer[bytes_read] = '\0'; // Null-terminate
-  file.close();
-
-  if (bytes_read != file_size) {
-    BRIDGE_DEBUG_PRINTLN("Failed to read certificate file: %s\n", filename);
-    return false;
-  }
-
-  BRIDGE_DEBUG_PRINTLN("Loaded certificate from %s (%d bytes)\n", filename, bytes_read);
-  return true;
-}
-
-void MQTTBridge::configureTLS() {
-  // CRITICAL: Set hostname for SNI (Server Name Indication) BEFORE any cert configuration
-  // This is required for modern MQTT brokers that use SNI for TLS routing
-  // Must be called before setInsecure() or setCACert()
-  BRIDGE_DEBUG_PRINTLN("MQTT TLS: Setting hostname for SNI: %s\n", _broker_hostname);
-  
-  // Check if insecure mode is enabled in prefs or compile-time define
-  bool insecure = _prefs->bridge_mqtt_tls_insecure;
-#ifdef WITH_MQTT_TLS_INSECURE
-  insecure = true;
-#endif
-
-  if (insecure) {
-    // Skip certificate verification (not recommended for production)
-    _wifi_client.setInsecure();
-    BRIDGE_DEBUG_PRINTLN("MQTT TLS: Insecure mode enabled (certificate verification disabled)\n");
-    return;
-  }
-
-  // Try to load CA certificate from file system (takes precedence over compile-time define)
-  if (loadCertFromFile("/mqtt_ca.crt", _ca_cert_buffer, CERT_BUFFER_SIZE)) {
-    _wifi_client.setCACert(_ca_cert_buffer);
-    BRIDGE_DEBUG_PRINTLN("MQTT TLS: CA certificate loaded from file system\n");
-  }
-#ifdef WITH_MQTT_CA_CERT
-  else {
-    _wifi_client.setCACert(WITH_MQTT_CA_CERT);
-    BRIDGE_DEBUG_PRINTLN("MQTT TLS: CA certificate configured from compile-time define\n");
-  }
-#else
-  else {
-    // No CA cert provided - use insecure mode
-    _wifi_client.setInsecure();
-    BRIDGE_DEBUG_PRINTLN("MQTT TLS: No CA certificate provided, using insecure mode\n");
-  }
-#endif
-}
-#endif
 
 void MQTTBridge::begin() {
   // Generate client ID if not set in prefs (WiFi must be initialized first)
@@ -224,54 +110,6 @@ void MQTTBridge::end() {
   _initialized = false;
 }
 
-bool MQTTBridge::reconnect() {
-  if (_mqtt_client.connected()) {
-    return true;
-  }
-
-  unsigned long now = millis();
-  if (now - _last_reconnect_attempt < RECONNECT_INTERVAL) {
-    return false;
-  }
-
-  _last_reconnect_attempt = now;
-
-  // Get parameters from prefs
-  const char *broker = _prefs->bridge_mqtt_broker;
-  uint16_t port =
-      _prefs->bridge_mqtt_port > 0 ? _prefs->bridge_mqtt_port : (_prefs->bridge_mqtt_tls ? 8883 : 1883);
-  const char *topic = _prefs->bridge_mqtt_topic;
-  const char *client_id =
-      _prefs->bridge_mqtt_client_id[0] != 0 ? _prefs->bridge_mqtt_client_id : _client_id_buf;
-  const char *user = _prefs->bridge_mqtt_user[0] != 0 ? _prefs->bridge_mqtt_user : nullptr;
-  const char *password = _prefs->bridge_mqtt_password[0] != 0 ? _prefs->bridge_mqtt_password : nullptr;
-
-  BRIDGE_DEBUG_PRINTLN("Attempting MQTT connection to %s:%d as %s...\n", broker, port, client_id);
-
-  bool connected;
-  if (user && password) {
-    connected = _mqtt_client.connect(client_id, user, password);
-  } else {
-    connected = _mqtt_client.connect(client_id);
-  }
-
-  if (connected) {
-    BRIDGE_DEBUG_PRINTLN("MQTT connected!\n");
-
-    // Subscribe to bridge topic
-    if (_mqtt_client.subscribe(topic)) {
-      BRIDGE_DEBUG_PRINTLN("Subscribed to topic: %s\n", topic);
-    } else {
-      BRIDGE_DEBUG_PRINTLN("Failed to subscribe!\n");
-    }
-
-    return true;
-  } else {
-    BRIDGE_DEBUG_PRINTLN("MQTT connection failed, rc=%d\n", _mqtt_client.state());
-    return false;
-  }
-}
-
 void MQTTBridge::loop() {
   // Check and restore WiFi connection first
   if (WiFi.status() != WL_CONNECTED) {
@@ -287,58 +125,6 @@ void MQTTBridge::loop() {
   if (_mqtt_client.connected()) {
     _mqtt_client.loop();
   }
-}
-
-void MQTTBridge::mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
-  if (_instance) {
-    _instance->onMqttMessage(topic, payload, length);
-  }
-}
-
-void MQTTBridge::onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
-  // Validate minimum packet size
-  if (length < BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE) {
-    BRIDGE_DEBUG_PRINTLN("RX packet too short, len=%d\n", length);
-    return;
-  }
-
-  // Validate magic header
-  uint16_t magic = (payload[0] << 8) | payload[1];
-  if (magic != BRIDGE_PACKET_MAGIC) {
-    BRIDGE_DEBUG_PRINTLN("RX invalid magic 0x%04X\n", magic);
-    return;
-  }
-
-  // Extract checksum
-  uint16_t received_checksum = (payload[2] << 8) | payload[3];
-
-  // Calculate payload size
-  size_t payload_size = length - BRIDGE_MAGIC_SIZE - BRIDGE_CHECKSUM_SIZE;
-  uint8_t *mesh_payload = payload + BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE;
-
-  // Validate checksum
-  if (!validateChecksum(mesh_payload, payload_size, received_checksum)) {
-    BRIDGE_DEBUG_PRINTLN("RX checksum mismatch, rcv=0x%04X\n", received_checksum);
-    return;
-  }
-
-  // Allocate mesh packet
-  mesh::Packet *packet = _mgr->allocNew();
-  if (!packet) {
-    BRIDGE_DEBUG_PRINTLN("RX failed to allocate packet\n");
-    return;
-  }
-
-  // Read mesh packet from buffer
-  if (!packet->readFrom(mesh_payload, payload_size)) {
-    BRIDGE_DEBUG_PRINTLN("RX failed to parse packet\n");
-    _mgr->free(packet);
-    return;
-  }
-
-  BRIDGE_DEBUG_PRINTLN("RX, len=%d type=%d\n", payload_size, packet->getPayloadType());
-
-  onPacketReceived(packet);
 }
 
 void MQTTBridge::sendPacket(mesh::Packet *packet) {
@@ -403,5 +189,223 @@ void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
   // Delegate to base class for duplicate check and queueing (consistent with RS232Bridge)
   handleReceivedPacket(packet);
 }
+
+// Private methods
+
+void MQTTBridge::generateClientId() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  snprintf(_client_id_buf, sizeof(_client_id_buf), "meshcore-%02X%02X%02X", mac[3], mac[4], mac[5]);
+}
+
+bool MQTTBridge::reconnectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return true;
+  }
+
+  unsigned long now = millis();
+  if (now - _last_wifi_reconnect_attempt < WIFI_RECONNECT_INTERVAL) {
+    return false;
+  }
+
+  _last_wifi_reconnect_attempt = now;
+
+  // Get WiFi credentials from prefs
+  const char *ssid = _prefs->bridge_wifi_ssid;
+  const char *password = _prefs->bridge_wifi_password;
+
+  if (ssid[0] == 0) {
+    BRIDGE_DEBUG_PRINTLN("WiFi not configured!\n");
+    return false;
+  }
+
+  BRIDGE_DEBUG_PRINTLN("WiFi disconnected, attempting reconnection\n");
+  WiFi.disconnect();
+  WiFi.begin(ssid, password);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 3000) {
+    delay(500);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    BRIDGE_DEBUG_PRINTLN("WiFi reconnected, IP: %s\n", WiFi.localIP().toString().c_str());
+    return true;
+  } else {
+    BRIDGE_DEBUG_PRINTLN("WiFi reconnection failed!\n");
+    return false;
+  }
+}
+
+bool MQTTBridge::reconnect() {
+  if (_mqtt_client.connected()) {
+    return true;
+  }
+
+  unsigned long now = millis();
+  if (now - _last_reconnect_attempt < RECONNECT_INTERVAL) {
+    return false;
+  }
+
+  _last_reconnect_attempt = now;
+
+  // Get parameters from prefs
+  const char *broker = _prefs->bridge_mqtt_broker;
+  uint16_t port =
+      _prefs->bridge_mqtt_port > 0 ? _prefs->bridge_mqtt_port : (_prefs->bridge_mqtt_tls ? 8883 : 1883);
+  const char *topic = _prefs->bridge_mqtt_topic;
+  const char *client_id =
+      _prefs->bridge_mqtt_client_id[0] != 0 ? _prefs->bridge_mqtt_client_id : _client_id_buf;
+  const char *user = _prefs->bridge_mqtt_user[0] != 0 ? _prefs->bridge_mqtt_user : nullptr;
+  const char *password = _prefs->bridge_mqtt_password[0] != 0 ? _prefs->bridge_mqtt_password : nullptr;
+
+  BRIDGE_DEBUG_PRINTLN("Attempting MQTT connection to %s:%d as %s...\n", broker, port, client_id);
+
+  bool connected;
+  if (user && password) {
+    connected = _mqtt_client.connect(client_id, user, password);
+  } else {
+    connected = _mqtt_client.connect(client_id);
+  }
+
+  if (connected) {
+    BRIDGE_DEBUG_PRINTLN("MQTT connected!\n");
+
+    // Subscribe to bridge topic
+    if (_mqtt_client.subscribe(topic)) {
+      BRIDGE_DEBUG_PRINTLN("Subscribed to topic: %s\n", topic);
+    } else {
+      BRIDGE_DEBUG_PRINTLN("Failed to subscribe!\n");
+    }
+
+    return true;
+  } else {
+    BRIDGE_DEBUG_PRINTLN("MQTT connection failed, rc=%d\n", _mqtt_client.state());
+    return false;
+  }
+}
+
+void MQTTBridge::mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
+  if (_instance) {
+    _instance->onMqttMessage(topic, payload, length);
+  }
+}
+
+void MQTTBridge::onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
+  // Validate minimum packet size
+  if (length < BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE) {
+    BRIDGE_DEBUG_PRINTLN("RX packet too short, len=%d\n", length);
+    return;
+  }
+
+  // Validate magic header
+  uint16_t magic = (payload[0] << 8) | payload[1];
+  if (magic != BRIDGE_PACKET_MAGIC) {
+    BRIDGE_DEBUG_PRINTLN("RX invalid magic 0x%04X\n", magic);
+    return;
+  }
+
+  // Extract checksum
+  uint16_t received_checksum = (payload[2] << 8) | payload[3];
+
+  // Calculate payload size
+  size_t payload_size = length - BRIDGE_MAGIC_SIZE - BRIDGE_CHECKSUM_SIZE;
+  uint8_t *mesh_payload = payload + BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE;
+
+  // Validate checksum
+  if (!validateChecksum(mesh_payload, payload_size, received_checksum)) {
+    BRIDGE_DEBUG_PRINTLN("RX checksum mismatch, rcv=0x%04X\n", received_checksum);
+    return;
+  }
+
+  // Allocate mesh packet
+  mesh::Packet *packet = _mgr->allocNew();
+  if (!packet) {
+    BRIDGE_DEBUG_PRINTLN("RX failed to allocate packet\n");
+    return;
+  }
+
+  // Read mesh packet from buffer
+  if (!packet->readFrom(mesh_payload, payload_size)) {
+    BRIDGE_DEBUG_PRINTLN("RX failed to parse packet\n");
+    _mgr->free(packet);
+    return;
+  }
+
+  BRIDGE_DEBUG_PRINTLN("RX, len=%d type=%d\n", payload_size, packet->getPayloadType());
+
+  onPacketReceived(packet);
+}
+
+#ifdef WITH_MQTT_TLS
+bool MQTTBridge::loadCertFromFile(const char* filename, char* buffer, size_t max_size) {
+  if (!FS_IMPL.exists(filename)) {
+    return false;
+  }
+
+  auto file = FS_IMPL.open(filename, "r");
+  if (!file) {
+    BRIDGE_DEBUG_PRINTLN("Failed to open certificate file: %s\n", filename);
+    return false;
+  }
+
+  size_t file_size = file.size();
+  if (file_size == 0 || file_size >= max_size) {
+    BRIDGE_DEBUG_PRINTLN("Certificate file size invalid: %s (%d bytes)\n", filename, file_size);
+    file.close();
+    return false;
+  }
+
+  size_t bytes_read = file.readBytes(buffer, file_size);
+  buffer[bytes_read] = '\0'; // Null-terminate
+  file.close();
+
+  if (bytes_read != file_size) {
+    BRIDGE_DEBUG_PRINTLN("Failed to read certificate file: %s\n", filename);
+    return false;
+  }
+
+  BRIDGE_DEBUG_PRINTLN("Loaded certificate from %s (%d bytes)\n", filename, bytes_read);
+  return true;
+}
+
+void MQTTBridge::configureTLS() {
+  // CRITICAL: Set hostname for SNI (Server Name Indication) BEFORE any cert configuration
+  // This is required for modern MQTT brokers that use SNI for TLS routing
+  // Must be called before setInsecure() or setCACert()
+  BRIDGE_DEBUG_PRINTLN("MQTT TLS: Setting hostname for SNI: %s\n", _broker_hostname);
+  
+  // Check if insecure mode is enabled in prefs or compile-time define
+  bool insecure = _prefs->bridge_mqtt_tls_insecure;
+#ifdef WITH_MQTT_TLS_INSECURE
+  insecure = true;
+#endif
+
+  if (insecure) {
+    // Skip certificate verification (not recommended for production)
+    _wifi_client.setInsecure();
+    BRIDGE_DEBUG_PRINTLN("MQTT TLS: Insecure mode enabled (certificate verification disabled)\n");
+    return;
+  }
+
+  // Try to load CA certificate from file system (takes precedence over compile-time define)
+  if (loadCertFromFile("/mqtt_ca.crt", _ca_cert_buffer, CERT_BUFFER_SIZE)) {
+    _wifi_client.setCACert(_ca_cert_buffer);
+    BRIDGE_DEBUG_PRINTLN("MQTT TLS: CA certificate loaded from file system\n");
+  }
+#ifdef WITH_MQTT_CA_CERT
+  else {
+    _wifi_client.setCACert(WITH_MQTT_CA_CERT);
+    BRIDGE_DEBUG_PRINTLN("MQTT TLS: CA certificate configured from compile-time define\n");
+  }
+#else
+  else {
+    // No CA cert provided - use insecure mode
+    _wifi_client.setInsecure();
+    BRIDGE_DEBUG_PRINTLN("MQTT TLS: No CA certificate provided, using insecure mode\n");
+  }
+#endif
+}
+#endif
 
 #endif // WITH_MQTT_BRIDGE
