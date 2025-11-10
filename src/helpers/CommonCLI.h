@@ -4,7 +4,7 @@
 #include <helpers/IdentityStore.h>
 #include <helpers/SensorManager.h>
 
-#if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_MQTT_BRIDGE)
 #define WITH_BRIDGE
 #endif
 
@@ -42,6 +42,18 @@ struct NodePrefs { // persisted to file
   uint32_t bridge_baud;   // 9600, 19200, 38400, 57600, 115200 (default 115200)
   uint8_t bridge_channel; // 1-14 (ESP-NOW only)
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
+  // MQTT Bridge settings
+  char bridge_mqtt_broker[64];   // MQTT broker hostname/IP
+  uint16_t bridge_mqtt_port;     // MQTT port (default 1883 or 8883 for TLS)
+  char bridge_mqtt_topic[32];    // MQTT topic (default "meshcore/bridge")
+  char bridge_mqtt_user[32];     // MQTT username (optional)
+  char bridge_mqtt_password[32]; // MQTT password (optional)
+  char bridge_mqtt_client_id[32];// MQTT client ID (optional, auto-generated if empty)
+  uint8_t bridge_mqtt_tls;       // boolean: use TLS/SSL
+  uint8_t bridge_mqtt_tls_insecure; // boolean: skip certificate verification
+  // WiFi settings (for MQTT bridge)
+  char bridge_wifi_ssid[32];     // WiFi SSID
+  char bridge_wifi_password[64]; // WiFi password
   // Gps settings
   uint8_t gps_enabled;
   uint32_t gps_interval; // in seconds

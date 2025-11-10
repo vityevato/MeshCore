@@ -4,6 +4,16 @@
 #include "AdvertDataHelpers.h"
 #include <RTClib.h>
 
+#ifdef WITH_MQTT_BRIDGE
+#ifdef ESP_PLATFORM
+#include <SPIFFS.h>
+#elif defined(NRF52_PLATFORM)
+#include <InternalFileSystem.h>
+#elif defined(STM32_PLATFORM)
+#include <stm32/InternalFileSystem.h>
+#endif
+#endif
+
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
   uint32_t n = 0;
@@ -71,6 +81,17 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->advert_loc_policy, sizeof (_prefs->advert_loc_policy));          // 161
     file.read((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162
     // 166
+    file.read((uint8_t *)&_prefs->bridge_mqtt_broker, sizeof(_prefs->bridge_mqtt_broker));                       // 166
+    file.read((uint8_t *)&_prefs->bridge_mqtt_port, sizeof(_prefs->bridge_mqtt_port));                           // 230
+    file.read((uint8_t *)&_prefs->bridge_mqtt_topic, sizeof(_prefs->bridge_mqtt_topic));                         // 232
+    file.read((uint8_t *)&_prefs->bridge_mqtt_user, sizeof(_prefs->bridge_mqtt_user));                           // 264
+    file.read((uint8_t *)&_prefs->bridge_mqtt_password, sizeof(_prefs->bridge_mqtt_password));                   // 296
+    file.read((uint8_t *)&_prefs->bridge_mqtt_client_id, sizeof(_prefs->bridge_mqtt_client_id));                 // 328
+    file.read((uint8_t *)&_prefs->bridge_mqtt_tls, sizeof(_prefs->bridge_mqtt_tls));                             // 360
+    file.read((uint8_t *)&_prefs->bridge_mqtt_tls_insecure, sizeof(_prefs->bridge_mqtt_tls_insecure));           // 361
+    file.read((uint8_t *)&_prefs->bridge_wifi_ssid, sizeof(_prefs->bridge_wifi_ssid));                           // 362
+    file.read((uint8_t *)&_prefs->bridge_wifi_password, sizeof(_prefs->bridge_wifi_password));                   // 394
+    // 458
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -90,6 +111,11 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->bridge_pkt_src = constrain(_prefs->bridge_pkt_src, 0, 1);
     _prefs->bridge_baud = constrain(_prefs->bridge_baud, 9600, 115200);
     _prefs->bridge_channel = constrain(_prefs->bridge_channel, 0, 14);
+
+    // sanitise bad MQTT pref values
+    _prefs->bridge_mqtt_port = constrain(_prefs->bridge_mqtt_port, 1, 65535);
+    _prefs->bridge_mqtt_tls = constrain(_prefs->bridge_mqtt_tls, 0, 1);
+    _prefs->bridge_mqtt_tls_insecure = constrain(_prefs->bridge_mqtt_tls_insecure, 0, 1);
 
     _prefs->gps_enabled = constrain(_prefs->gps_enabled, 0, 1);
     _prefs->advert_loc_policy = constrain(_prefs->advert_loc_policy, 0, 2);
@@ -149,6 +175,17 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->advert_loc_policy, sizeof(_prefs->advert_loc_policy));           // 161
     file.write((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162
     // 166
+    file.write((uint8_t *)&_prefs->bridge_mqtt_broker, sizeof(_prefs->bridge_mqtt_broker));                       // 166
+    file.write((uint8_t *)&_prefs->bridge_mqtt_port, sizeof(_prefs->bridge_mqtt_port));                           // 230
+    file.write((uint8_t *)&_prefs->bridge_mqtt_topic, sizeof(_prefs->bridge_mqtt_topic));                         // 232
+    file.write((uint8_t *)&_prefs->bridge_mqtt_user, sizeof(_prefs->bridge_mqtt_user));                           // 264
+    file.write((uint8_t *)&_prefs->bridge_mqtt_password, sizeof(_prefs->bridge_mqtt_password));                   // 296
+    file.write((uint8_t *)&_prefs->bridge_mqtt_client_id, sizeof(_prefs->bridge_mqtt_client_id));                 // 328
+    file.write((uint8_t *)&_prefs->bridge_mqtt_tls, sizeof(_prefs->bridge_mqtt_tls));                             // 360
+    file.write((uint8_t *)&_prefs->bridge_mqtt_tls_insecure, sizeof(_prefs->bridge_mqtt_tls_insecure));           // 361
+    file.write((uint8_t *)&_prefs->bridge_wifi_ssid, sizeof(_prefs->bridge_wifi_ssid));                           // 362
+    file.write((uint8_t *)&_prefs->bridge_wifi_password, sizeof(_prefs->bridge_wifi_password));                   // 394
+    // 458
 
     file.close();
   }
@@ -309,6 +346,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
                 "rs232"
 #elif WITH_ESPNOW_BRIDGE
                 "espnow"
+#elif WITH_MQTT_BRIDGE
+                "mqtt"
 #else
                 "none"
 #endif
@@ -330,6 +369,37 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         sprintf(reply, "> %d", (uint32_t)_prefs->bridge_channel);
       } else if (memcmp(config, "bridge.secret", 13) == 0) {
         sprintf(reply, "> %s", _prefs->bridge_secret);
+#endif
+#ifdef WITH_MQTT_BRIDGE
+      } else if (memcmp(config, "mqtt.broker", 11) == 0) {
+        sprintf(reply, "> %s", _prefs->bridge_mqtt_broker);
+      } else if (memcmp(config, "mqtt.port", 9) == 0) {
+        sprintf(reply, "> %d", (uint32_t)_prefs->bridge_mqtt_port);
+      } else if (memcmp(config, "mqtt.topic", 10) == 0) {
+        sprintf(reply, "> %s", _prefs->bridge_mqtt_topic);
+      } else if (memcmp(config, "mqtt.user", 9) == 0) {
+        sprintf(reply, "> %s", _prefs->bridge_mqtt_user);
+      } else if (memcmp(config, "mqtt.password", 13) == 0) {
+        sprintf(reply, "> %s", _prefs->bridge_mqtt_password);
+      } else if (memcmp(config, "mqtt.client_id", 14) == 0) {
+        sprintf(reply, "> %s", _prefs->bridge_mqtt_client_id);
+      } else if (memcmp(config, "mqtt.tls", 8) == 0) {
+        sprintf(reply, "> %s", _prefs->bridge_mqtt_tls ? "on" : "off");
+      } else if (memcmp(config, "mqtt.tls_insecure", 17) == 0) {
+        sprintf(reply, "> %s", _prefs->bridge_mqtt_tls_insecure ? "on" : "off");
+      } else if (memcmp(config, "wifi.ssid", 9) == 0) {
+        sprintf(reply, "> %s", _prefs->bridge_wifi_ssid);
+      } else if (memcmp(config, "wifi.password", 13) == 0) {
+        sprintf(reply, "> %s", _prefs->bridge_wifi_password);
+      } else if (memcmp(config, "mqtt.cert.status", 16) == 0) {
+        // Check CA certificate file status
+        bool ca_exists = false;
+#ifdef ESP_PLATFORM
+        ca_exists = SPIFFS.exists("/mqtt_ca.crt");
+#elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+        ca_exists = InternalFS.exists("/mqtt_ca.crt");
+#endif
+        sprintf(reply, "CA: %s", ca_exists ? "YES" : "NO");
 #endif
       } else {
         sprintf(reply, "??: %s", config);
@@ -522,6 +592,103 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         _callbacks->restartBridge();
         savePrefs();
         strcpy(reply, "OK");
+#endif
+#ifdef WITH_MQTT_BRIDGE
+      } else if (memcmp(config, "mqtt.broker ", 12) == 0) {
+        StrHelper::strncpy(_prefs->bridge_mqtt_broker, &config[12], sizeof(_prefs->bridge_mqtt_broker));
+        savePrefs();
+        strcpy(reply, "OK - reboot to apply");
+      } else if (memcmp(config, "mqtt.port ", 10) == 0) {
+        int port = atoi(&config[10]);
+        if (port > 0 && port <= 65535) {
+          _prefs->bridge_mqtt_port = (uint16_t)port;
+          savePrefs();
+          strcpy(reply, "OK - reboot to apply");
+        } else {
+          strcpy(reply, "Error: port must be between 1-65535");
+        }
+      } else if (memcmp(config, "mqtt.topic ", 11) == 0) {
+        StrHelper::strncpy(_prefs->bridge_mqtt_topic, &config[11], sizeof(_prefs->bridge_mqtt_topic));
+        savePrefs();
+        strcpy(reply, "OK - reboot to apply");
+      } else if (memcmp(config, "mqtt.user ", 10) == 0) {
+        StrHelper::strncpy(_prefs->bridge_mqtt_user, &config[10], sizeof(_prefs->bridge_mqtt_user));
+        savePrefs();
+        strcpy(reply, "OK - reboot to apply");
+      } else if (memcmp(config, "mqtt.password ", 14) == 0) {
+        StrHelper::strncpy(_prefs->bridge_mqtt_password, &config[14], sizeof(_prefs->bridge_mqtt_password));
+        savePrefs();
+        strcpy(reply, "OK - reboot to apply");
+      } else if (memcmp(config, "mqtt.client_id ", 15) == 0) {
+        StrHelper::strncpy(_prefs->bridge_mqtt_client_id, &config[15], sizeof(_prefs->bridge_mqtt_client_id));
+        savePrefs();
+        strcpy(reply, "OK - reboot to apply");
+      } else if (memcmp(config, "mqtt.tls ", 9) == 0) {
+        _prefs->bridge_mqtt_tls = memcmp(&config[9], "on", 2) == 0;
+        savePrefs();
+        strcpy(reply, "OK - reboot to apply");
+      } else if (memcmp(config, "mqtt.tls_insecure ", 18) == 0) {
+        _prefs->bridge_mqtt_tls_insecure = memcmp(&config[18], "on", 2) == 0;
+        savePrefs();
+        strcpy(reply, "OK - reboot to apply");
+      } else if (memcmp(config, "wifi.ssid ", 10) == 0) {
+        StrHelper::strncpy(_prefs->bridge_wifi_ssid, &config[10], sizeof(_prefs->bridge_wifi_ssid));
+        savePrefs();
+        strcpy(reply, "OK - reboot to apply");
+      } else if (memcmp(config, "wifi.password ", 14) == 0) {
+        StrHelper::strncpy(_prefs->bridge_wifi_password, &config[14], sizeof(_prefs->bridge_wifi_password));
+        savePrefs();
+        strcpy(reply, "OK - reboot to apply");
+      } else if (memcmp(config, "mqtt.cert.upload ", 17) == 0) {
+        // Upload CA certificate line by line
+        // Usage: set mqtt.cert.upload <line>
+        // Special commands: BEGIN - start upload, END - finish upload
+        const char* line = &config[17];
+        
+        static File cert_file;
+        static bool uploading = false;
+        
+        if (strcmp(line, "BEGIN") == 0) {
+          // Close previous file if still open
+          if (cert_file) {
+            cert_file.close();
+          }
+          
+#ifdef ESP_PLATFORM
+          cert_file = SPIFFS.open("/mqtt_ca.crt", FILE_WRITE);
+#elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+          cert_file = InternalFS.open("/mqtt_ca.crt", FILE_WRITE);
+#endif
+          if (cert_file) {
+            uploading = true;
+            strcpy(reply, "OK - ready to receive");
+          } else {
+            uploading = false;
+            strcpy(reply, "Error opening file");
+          }
+        } else if (strcmp(line, "END") == 0) {
+          if (uploading && cert_file) {
+            cert_file.close();
+            uploading = false;
+            strcpy(reply, "OK - certificate saved");
+          } else {
+            strcpy(reply, "Error - no upload in progress");
+          }
+        } else if (uploading && cert_file) {
+          cert_file.println(line);
+          strcpy(reply, "OK");
+        } else {
+          strcpy(reply, "Error - call BEGIN first");
+        }
+      } else if (memcmp(config, "mqtt.cert.clear", 15) == 0) {
+        // Delete CA certificate file
+        bool success = true;
+#ifdef ESP_PLATFORM
+        if (SPIFFS.exists("/mqtt_ca.crt")) success = SPIFFS.remove("/mqtt_ca.crt");
+#elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+        if (InternalFS.exists("/mqtt_ca.crt")) success = InternalFS.remove("/mqtt_ca.crt");
+#endif
+        strcpy(reply, success ? "OK - CA certificate cleared" : "Error clearing certificate");
 #endif
       } else {
         sprintf(reply, "unknown config: %s", config);
