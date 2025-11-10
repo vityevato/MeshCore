@@ -14,4 +14,3 @@ cmake-*
 .cache
 .ccls
 compile_commands.json
-platformio.ini

@@ -14,16 +14,36 @@
 #include <PubSubClient.h>
 #include <WiFi.h>
 
-#ifndef WITH_MQTT_BROKER
-#error WITH_MQTT_BROKER must be defined (e.g. "mqtt.example.com")
-#endif
+#ifdef WITH_MQTT_TLS
+#include <WiFiClientSecure.h>
 
-#ifndef WITH_MQTT_PORT
-#define WITH_MQTT_PORT 1883
-#endif
-
-#ifndef WITH_MQTT_TOPIC
-#define WITH_MQTT_TOPIC "meshcore/bridge"
+/**
+ * Wrapper for WiFiClientSecure that ensures SNI (Server Name Indication) is used
+ * PubSubClient calls connect(IPAddress, port) which doesn't set SNI hostname
+ * This wrapper intercepts and redirects to connect(hostname, port)
+ */
+class WiFiClientSecureWithSNI : public WiFiClientSecure {
+private:
+  char _hostname[128];
+  uint16_t _port;
+  
+public:
+  void setHostname(const char* hostname, uint16_t port) {
+    strncpy(_hostname, hostname, sizeof(_hostname) - 1);
+    _hostname[sizeof(_hostname) - 1] = '\0';
+    _port = port;
+  }
+  
+  // Override connect(IPAddress, port) to use hostname instead
+  int connect(IPAddress ip, uint16_t port) override {
+    if (_hostname[0] != '\0') {
+      // Use hostname for SNI
+      return WiFiClientSecure::connect(_hostname, _port);
+    }
+    // Fallback to IP if hostname not set
+    return WiFiClientSecure::connect(ip, port);
+  }
+};
 #endif
 
 /**
@@ -38,7 +58,7 @@
  * - Duplicate packet detection using SimpleMeshTables tracking
  * - Automatic reconnection on connection loss
  * - Optional authentication (username/password)
- * - Optional TLS/SSL support
+ * - Optional TLS/SSL support (define WITH_MQTT_TLS)
  *
  * Packet Structure:
  * [2 bytes] Magic Header (0xC03E) - Used to identify MQTTBridge packets
@@ -47,53 +67,53 @@
  *
  * Configuration:
  * - Define WITH_MQTT_BRIDGE to enable this bridge
- * - Define WITH_MQTT_BROKER with broker hostname/IP
- * - Define WITH_MQTT_PORT (optional, default 1883)
- * - Define WITH_MQTT_TOPIC (optional, default "meshcore/bridge")
- * - Define WITH_MQTT_USER (optional)
- * - Define WITH_MQTT_PASSWORD (optional)
- * - Define WITH_MQTT_CLIENT_ID (optional, auto-generated if not set)
- * - Define WITH_WIFI_SSID and WITH_WIFI_PASSWORD for WiFi connection
+ * - All MQTT parameters (broker, port, topic, credentials) must be configured via CLI
+ * - WiFi credentials must be configured via CLI
+ * - See docs/cli_commands.md for available commands
+ *
+ * TLS Configuration:
+ * - Define WITH_MQTT_TLS to enable TLS/SSL encryption
+ * - Define WITH_MQTT_CA_CERT with CA certificate (optional, insecure mode if not set)
+ * - Define WITH_MQTT_TLS_INSECURE to skip certificate verification (not recommended)
+ *
+ * Runtime TLS Configuration (via CLI):
+ * - CA certificate can be stored in file system:
+ *   - /mqtt_ca.crt - CA certificate for server verification
+ * - Use CLI commands to manage certificate (see docs/cli_commands.md)
+ * - Runtime certificate takes precedence over compile-time define
  *
  * Note: MQTT_MAX_PACKET_SIZE is automatically set to 512 bytes to support full-size
  * mesh packets (up to 260 bytes) with safety margin for future protocol versions.
  */
-class MQTTBridge : public BridgeBase
-{
+class MQTTBridge : public BridgeBase {
 private:
+#ifdef WITH_MQTT_TLS
+  WiFiClientSecureWithSNI _wifi_client;
+  
+  // Static buffer for CA certificate (WiFiClientSecure stores pointer, not copy)
+  static const size_t CERT_BUFFER_SIZE = 3072;
+  char _ca_cert_buffer[CERT_BUFFER_SIZE];
+#else
   WiFiClient _wifi_client;
+#endif
   PubSubClient _mqtt_client;
 
-  const char *_broker = WITH_MQTT_BROKER;
-  uint16_t _port = WITH_MQTT_PORT;
-  const char *_topic = WITH_MQTT_TOPIC;
-
-#ifdef WITH_MQTT_USER
-  const char *_user = WITH_MQTT_USER;
-#else
-  const char *_user = nullptr;
-#endif
-
-#ifdef WITH_MQTT_PASSWORD
-  const char *_password = WITH_MQTT_PASSWORD;
-#else
-  const char *_password = nullptr;
-#endif
-
-#ifdef WITH_MQTT_CLIENT_ID
-  const char *_client_id = WITH_MQTT_CLIENT_ID;
-#else
-  char _client_id[32]; // auto-generated
-#endif
+  // Auto-generated client ID buffer (if not set in prefs or compile-time)
+  char _client_id_buf[32] = {0};
+  
+  // Hostname for SNI (Server Name Indication) in TLS
+  char _broker_hostname[128] = {0};
 
   /** Buffer for building MQTT messages */
-  static const size_t MAX_MQTT_PAYLOAD =
-      BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE + (MAX_TRANS_UNIT + 1);
+  static const size_t MAX_MQTT_PAYLOAD = BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE + (MAX_TRANS_UNIT + 1);
 
   uint8_t _tx_buffer[MAX_MQTT_PAYLOAD];
 
   unsigned long _last_reconnect_attempt = 0;
-  static const unsigned long RECONNECT_INTERVAL = 5000; // 5 seconds
+  static const unsigned long RECONNECT_INTERVAL = 30000; // 30 seconds
+
+  unsigned long _last_wifi_reconnect_attempt = 0;
+  static const unsigned long WIFI_RECONNECT_INTERVAL = 30000; // 30 seconds
 
   /**
    * MQTT callback for received messages
@@ -116,6 +136,27 @@ private:
    * Generate unique client ID based on MAC address
    */
   void generateClientId();
+
+  /**
+   * Attempt to reconnect to WiFi
+   */
+  bool reconnectWiFi();
+
+#ifdef WITH_MQTT_TLS
+  /**
+   * Configure TLS settings for secure connection
+   */
+  void configureTLS();
+
+  /**
+   * Load certificate from file system
+   * @param filename Path to certificate file
+   * @param buffer Buffer to store certificate content
+   * @param max_size Maximum buffer size
+   * @return true if loaded successfully
+   */
+  bool loadCertFromFile(const char* filename, char* buffer, size_t max_size);
+#endif
 
 public:
   /**

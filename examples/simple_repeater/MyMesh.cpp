@@ -706,6 +706,25 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
   StrHelper::strncpy(_prefs.bridge_secret, "LVSITANOS", sizeof(_prefs.bridge_secret));
 
+  // MQTT Bridge defaults
+  StrHelper::strncpy(_prefs.bridge_mqtt_broker, "mqtt-private.example.com", sizeof(_prefs.bridge_mqtt_broker));
+#ifdef WITH_MQTT_TLS
+  _prefs.bridge_mqtt_port = 8883;
+#else
+  _prefs.bridge_mqtt_port = 1883;
+#endif
+  StrHelper::strncpy(_prefs.bridge_mqtt_topic, "meshcore/bridge", sizeof(_prefs.bridge_mqtt_topic));
+  _prefs.bridge_mqtt_client_id[0] = 0;  // auto-generate
+#ifdef WITH_MQTT_TLS
+  _prefs.bridge_mqtt_tls = WITH_MQTT_TLS;
+#else
+  _prefs.bridge_mqtt_tls = 0;  
+#endif
+  _prefs.bridge_mqtt_tls_insecure = 1;  // skip cert verification
+
+  // WiFi defaults
+  StrHelper::strncpy(_prefs.bridge_wifi_ssid, "PublicWiFi", sizeof(_prefs.bridge_wifi_ssid));
+
   // GPS defaults
   _prefs.gps_enabled = 0;
   _prefs.gps_interval = 0;
