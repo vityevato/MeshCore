@@ -36,9 +36,17 @@ set mqtt.port 8883
 #### `get mqtt.topic` / `set mqtt.topic <topic>`
 **⚠️ Requires reboot!** MQTT topic for publish/subscribe.
 
+**Important:** Topic must NOT contain MQTT wildcards (`#` or `+`). The bridge uses the same topic for both publishing and subscribing, so wildcards are not allowed.
+
 **Example:**
 ```
 set mqtt.topic meshcore/bridge
+```
+
+**Invalid examples:**
+```
+set mqtt.topic meshcore/#        # ERROR: wildcard not allowed
+set mqtt.topic meshcore/+/bridge # ERROR: wildcard not allowed
 ```
 
 #### `get mqtt.user` / `set mqtt.user <username>`

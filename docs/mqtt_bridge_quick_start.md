@@ -88,6 +88,26 @@ set mqtt.client_id my-unique-device-id
 
 By default, client ID is auto-generated from MAC address: `meshcore-ABC123`
 
+## Important Notes
+
+### MQTT Topic Restrictions
+
+**Topic must NOT contain MQTT wildcards** (`#` or `+`). The bridge uses the same topic for both publishing and subscribing, so wildcards are not supported.
+
+✅ **Valid:**
+```bash
+set mqtt.topic meshcore/bridge
+set mqtt.topic meshcore/zone1/bridge
+```
+
+❌ **Invalid:**
+```bash
+set mqtt.topic meshcore/#        # Wildcard not allowed
+set mqtt.topic meshcore/+/bridge # Wildcard not allowed
+```
+
+If you configure a topic with wildcards, the bridge will disconnect and refuse to connect.
+
 ## Default Values
 
 Default values are set in firmware (can be customized in `MyMesh.cpp` constructor):

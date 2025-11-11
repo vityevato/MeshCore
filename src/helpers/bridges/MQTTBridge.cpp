@@ -271,6 +271,13 @@ bool MQTTBridge::reconnect() {
   if (connected) {
     BRIDGE_DEBUG_PRINTLN("MQTT connected!\n");
 
+    // Check for wildcards in topic (not allowed for publish/subscribe)
+    if (strchr(topic, '#') != nullptr || strchr(topic, '+') != nullptr) {
+      BRIDGE_DEBUG_PRINTLN("ERROR: Topic contains wildcards (# or +), which are not allowed\n");
+      _mqtt_client.disconnect();
+      return false;
+    }
+
     // Subscribe to bridge topic
     if (_mqtt_client.subscribe(topic)) {
       BRIDGE_DEBUG_PRINTLN("Subscribed to topic: %s\n", topic);
