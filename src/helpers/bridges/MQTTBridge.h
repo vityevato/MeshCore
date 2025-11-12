@@ -89,9 +89,13 @@ class MQTTBridge : public BridgeBase {
 public:
 
   /**
-   * Constructs an MQTTBridge instance
+   * Constructs an MQTT bridge instance
+   * @param prefs Node preferences containing MQTT configuration
+   * @param mgr Packet manager for allocating packets
+   * @param rtc Real-time clock for timestamping
+   * @param self_id Local identity for generating unique bridge ID
    */
-  MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc);
+  MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *self_id);
 
   /**
    * Initializes the MQTT bridge
@@ -143,19 +147,30 @@ private:
   // Auto-generated client ID buffer (if not set in prefs or compile-time)
   char _client_id_buf[32] = {0};
   
+  // Topic buffers for publish and subscribe
+  char _publish_topic[128] = {0};   // <base_topic>/<repeater_id>
+  char _subscribe_topic[128] = {0}; // <base_topic>/+
+  
   // Hostname for SNI (Server Name Indication) in TLS
   char _broker_hostname[128] = {0};
 
-  /** Buffer for building MQTT messages */
-  static const size_t MAX_MQTT_PAYLOAD = BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE + (MAX_TRANS_UNIT + 1);
-
-  uint8_t _tx_buffer[MAX_MQTT_PAYLOAD];
+  // MQTT bridge packet timeout (discard packets older than this)
+  static const unsigned long MQTT_PACKET_TIMEOUT = 20000; // 20 seconds
+  static const size_t BRIDGE_TIMESTAMP_SIZE = sizeof(uint32_t); // 4 bytes
 
   unsigned long _last_reconnect_attempt = 0;
   static const unsigned long RECONNECT_INTERVAL = 30000; // 30 seconds
 
   unsigned long _last_wifi_reconnect_attempt = 0;
   static const unsigned long WIFI_RECONNECT_INTERVAL = 30000; // 30 seconds
+  
+  unsigned long _last_heap_warning = 0;
+  static const unsigned long HEAP_WARNING_INTERVAL = 60000; // 60 seconds
+  
+  /** Buffer for building MQTT messages */
+  static const size_t MAX_MQTT_PAYLOAD = BRIDGE_MAGIC_SIZE + BRIDGE_TIMESTAMP_SIZE + BRIDGE_CHECKSUM_SIZE + (MAX_TRANS_UNIT + 1);
+
+  uint8_t _tx_buffer[MAX_MQTT_PAYLOAD];
 
   /**
    * MQTT callback for received messages
@@ -183,6 +198,14 @@ private:
    * Attempt to reconnect to WiFi
    */
   bool reconnectWiFi();
+
+  /**
+   * Sync time via NTP
+   */
+  void syncTimeNTP();
+
+  /** Local identity for generating unique bridge ID */
+  mesh::LocalIdentity *_self_id;
 
 #ifdef WITH_MQTT_TLS
   /**

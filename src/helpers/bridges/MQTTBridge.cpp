@@ -1,4 +1,6 @@
 #include "MQTTBridge.h"
+#include <time.h>
+#include <esp_sntp.h>
 
 #ifdef WITH_MQTT_BRIDGE
 
@@ -25,8 +27,8 @@ MQTTBridge *MQTTBridge::_instance = nullptr;
 
 // Public methods
 
-MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc)
-    : BridgeBase(prefs, mgr, rtc), _mqtt_client(_wifi_client) {
+MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *self_id)
+    : BridgeBase(prefs, mgr, rtc), _mqtt_client(_wifi_client), _self_id(self_id) {
   _instance = this;
   _mqtt_client.setCallback(mqttCallback);
 }
@@ -36,6 +38,18 @@ void MQTTBridge::begin() {
   if (_prefs->bridge_mqtt_client_id[0] == 0) {
     generateClientId();
   }
+  
+  // Build publish and subscribe topics
+  const char *base_topic = _prefs->bridge_mqtt_topic;
+  const char *client_id = _prefs->bridge_mqtt_client_id[0] != 0 
+    ? _prefs->bridge_mqtt_client_id 
+    : _client_id_buf;
+  
+  // Publish topic: <base_topic>/<client_id>
+  snprintf(_publish_topic, sizeof(_publish_topic), "%s/%s", base_topic, client_id);
+  
+  // Subscribe topic: <base_topic>/+
+  snprintf(_subscribe_topic, sizeof(_subscribe_topic), "%s/+", base_topic);
 
   // Get broker and port from prefs (now they are loaded)
   const char *broker = _prefs->bridge_mqtt_broker;
@@ -74,11 +88,13 @@ void MQTTBridge::begin() {
 
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
-      delay(500);
+      delay(100);
+      yield(); // Feed watchdog
     }
 
     if (WiFi.status() == WL_CONNECTED) {
       BRIDGE_DEBUG_PRINTLN("WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
+      syncTimeNTP();
     } else {
       BRIDGE_DEBUG_PRINTLN("WiFi connection failed!\n");
       return;
@@ -111,6 +127,14 @@ void MQTTBridge::end() {
 }
 
 void MQTTBridge::loop() {
+  // Check free heap and log warning if low (rate limited)
+  uint32_t free_heap = ESP.getFreeHeap();
+  unsigned long now = millis();
+  if (free_heap < 10000 && (now - _last_heap_warning > HEAP_WARNING_INTERVAL)) {
+    BRIDGE_DEBUG_PRINTLN("WARNING: Low memory! Free heap: %d bytes\n", free_heap);
+    _last_heap_warning = now;
+  }
+
   // Check and restore WiFi connection first
   if (WiFi.status() != WL_CONNECTED) {
     reconnectWiFi();
@@ -125,6 +149,8 @@ void MQTTBridge::loop() {
   if (_mqtt_client.connected()) {
     _mqtt_client.loop();
   }
+  
+  yield(); // Feed watchdog after processing
 }
 
 void MQTTBridge::sendPacket(mesh::Packet *packet) {
@@ -155,31 +181,42 @@ void MQTTBridge::sendPacket(mesh::Packet *packet) {
     return;
   }
 
-  // Write mesh packet to buffer
-  size_t payload_size = packet->writeTo(_tx_buffer + BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE);
-
-  if (payload_size == 0 || payload_size > (MAX_MQTT_PAYLOAD - BRIDGE_MAGIC_SIZE - BRIDGE_CHECKSUM_SIZE)) {
-    BRIDGE_DEBUG_PRINTLN("TX failed to write packet or packet too large, len=%d\n", payload_size);
-    return;
-  }
-
   // Add magic header
   _tx_buffer[0] = (BRIDGE_PACKET_MAGIC >> 8) & 0xFF;
   _tx_buffer[1] = BRIDGE_PACKET_MAGIC & 0xFF;
 
-  // Calculate and add checksum
-  uint16_t checksum = fletcher16(_tx_buffer + BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE, payload_size);
+  // Reserve space for checksum (will be calculated later)
+  // Position [2-3] reserved for checksum
+
+  // Add timestamp (current time in seconds)
+  uint32_t now = _rtc->getCurrentTime();
+  _tx_buffer[4] = (now >> 24) & 0xFF;
+  _tx_buffer[5] = (now >> 16) & 0xFF;
+  _tx_buffer[6] = (now >> 8) & 0xFF;
+  _tx_buffer[7] = now & 0xFF;
+
+  // Write mesh packet to buffer (after magic, checksum, and timestamp)
+  size_t payload_size = packet->writeTo(_tx_buffer + BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE + BRIDGE_TIMESTAMP_SIZE);
+
+  if (payload_size == 0 || payload_size > (MAX_MQTT_PAYLOAD - BRIDGE_MAGIC_SIZE - BRIDGE_CHECKSUM_SIZE - BRIDGE_TIMESTAMP_SIZE)) {
+    BRIDGE_DEBUG_PRINTLN("TX failed to write packet or packet too large, len=%d\n", payload_size);
+    return;
+  }
+
+  // Calculate checksum over: [Timestamp 4 bytes] [Mesh Packet]
+  // Now it's contiguous memory starting from position [4]
+  uint16_t checksum = fletcher16(_tx_buffer + BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE, BRIDGE_TIMESTAMP_SIZE + payload_size);
+  
+  // Write checksum to reserved position
   _tx_buffer[2] = (checksum >> 8) & 0xFF;
   _tx_buffer[3] = checksum & 0xFF;
 
-  size_t total_size = BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE + payload_size;
+  size_t total_size = BRIDGE_MAGIC_SIZE + BRIDGE_TIMESTAMP_SIZE + BRIDGE_CHECKSUM_SIZE + payload_size;
 
-  // Get topic from prefs
-  const char *topic = _prefs->bridge_mqtt_topic;
-
-  // Publish to MQTT
-  if (_mqtt_client.publish(topic, _tx_buffer, total_size)) {
-    BRIDGE_DEBUG_PRINTLN("TX, len=%d type=%d\n", payload_size, packet->getPayloadType());
+  // Publish to our specific topic: <base_topic>/<repeater_id>
+  if (_mqtt_client.publish(_publish_topic, _tx_buffer, total_size)) {
+    BRIDGE_DEBUG_PRINTLN("TX to %s, len=%d type=%d timestamp=%u checksum=0x%04X\n", 
+                         _publish_topic, payload_size, packet->getPayloadType(), now, checksum);
   } else {
     BRIDGE_DEBUG_PRINTLN("TX publish failed\n");
   }
@@ -193,9 +230,10 @@ void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
 // Private methods
 
 void MQTTBridge::generateClientId() {
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
-  snprintf(_client_id_buf, sizeof(_client_id_buf), "meshcore-%02X%02X%02X", mac[3], mac[4], mac[5]);
+  // Use first 6 bytes of public key as unique identifier
+  const uint8_t *pub_key = _self_id->pub_key;
+  snprintf(_client_id_buf, sizeof(_client_id_buf), "%02x%02x%02x%02x%02x%02x", 
+           pub_key[0], pub_key[1], pub_key[2], pub_key[3], pub_key[4], pub_key[5]);
 }
 
 bool MQTTBridge::reconnectWiFi() {
@@ -225,15 +263,43 @@ bool MQTTBridge::reconnectWiFi() {
 
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 3000) {
-    delay(500);
+    delay(100);
+    yield(); // Feed watchdog
   }
 
   if (WiFi.status() == WL_CONNECTED) {
     BRIDGE_DEBUG_PRINTLN("WiFi reconnected, IP: %s\n", WiFi.localIP().toString().c_str());
+    syncTimeNTP();
     return true;
   } else {
     BRIDGE_DEBUG_PRINTLN("WiFi reconnection failed!\n");
     return false;
+  }
+}
+
+void MQTTBridge::syncTimeNTP() {
+  BRIDGE_DEBUG_PRINTLN("Syncing time via NTP...\n");
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  
+  // Wait for time sync (max 5 seconds)
+  int retry = 0;
+  while (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED && ++retry < 10) {
+    delay(500);
+    yield(); // Feed watchdog during NTP sync
+  }
+  
+  if (retry < 10) {
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    BRIDGE_DEBUG_PRINTLN("Time synced: %d-%02d-%02d %02d:%02d:%02d\n",
+                         timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                         timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    // Update RTC with NTP time
+    _rtc->setCurrentTime((uint32_t)now);
+  } else {
+    BRIDGE_DEBUG_PRINTLN("Failed to sync time via NTP!\n");
   }
 }
 
@@ -269,25 +335,25 @@ bool MQTTBridge::reconnect() {
   }
 
   if (connected) {
-    BRIDGE_DEBUG_PRINTLN("MQTT connected!\n");
+    BRIDGE_DEBUG_PRINTLN("MQTT connected! Free heap: %d bytes\n", ESP.getFreeHeap());
 
-    // Check for wildcards in topic (not allowed for publish/subscribe)
-    if (strchr(topic, '#') != nullptr || strchr(topic, '+') != nullptr) {
-      BRIDGE_DEBUG_PRINTLN("ERROR: Topic contains wildcards (# or +), which are not allowed\n");
-      _mqtt_client.disconnect();
-      return false;
-    }
-
-    // Subscribe to bridge topic
-    if (_mqtt_client.subscribe(topic)) {
-      BRIDGE_DEBUG_PRINTLN("Subscribed to topic: %s\n", topic);
+    // Subscribe to wildcard topic to receive from all other bridges: <base_topic>/+
+    if (_mqtt_client.subscribe(_subscribe_topic)) {
+      BRIDGE_DEBUG_PRINTLN("Subscribed to topic: %s\n", _subscribe_topic);
+      BRIDGE_DEBUG_PRINTLN("Publishing to topic: %s\n", _publish_topic);
     } else {
       BRIDGE_DEBUG_PRINTLN("Failed to subscribe!\n");
     }
 
     return true;
   } else {
-    BRIDGE_DEBUG_PRINTLN("MQTT connection failed, rc=%d\n", _mqtt_client.state());
+    int state = _mqtt_client.state();
+    BRIDGE_DEBUG_PRINTLN("MQTT connection failed, rc=%d, free heap: %d bytes\n", state, ESP.getFreeHeap());
+    
+    // Disconnect on persistent errors to free resources
+    if (state == -2 || state == -4) { // MQTT_CONNECT_FAILED or MQTT_CONNECTION_LOST
+      _mqtt_client.disconnect();
+    }
     return false;
   }
 }
@@ -299,8 +365,13 @@ void MQTTBridge::mqttCallback(char *topic, uint8_t *payload, unsigned int length
 }
 
 void MQTTBridge::onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
+  // Ignore packets from our own publish topic
+  if (strcmp(topic, _publish_topic) == 0) {
+    return; // This is our own packet, ignore it
+  }
+  
   // Validate minimum packet size
-  if (length < BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE) {
+  if (length < BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE + BRIDGE_TIMESTAMP_SIZE) {
     BRIDGE_DEBUG_PRINTLN("RX packet too short, len=%d\n", length);
     return;
   }
@@ -312,16 +383,39 @@ void MQTTBridge::onMqttMessage(char *topic, uint8_t *payload, unsigned int lengt
     return;
   }
 
+  BRIDGE_DEBUG_PRINTLN("RX from topic: %s, len=%d\n", topic, length);
+
   // Extract checksum
   uint16_t received_checksum = (payload[2] << 8) | payload[3];
 
-  // Calculate payload size
-  size_t payload_size = length - BRIDGE_MAGIC_SIZE - BRIDGE_CHECKSUM_SIZE;
-  uint8_t *mesh_payload = payload + BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE;
+  // Extract timestamp
+  uint32_t packet_timestamp = ((uint32_t)payload[4] << 24) | 
+                              ((uint32_t)payload[5] << 16) | 
+                              ((uint32_t)payload[6] << 8) | 
+                              (uint32_t)payload[7];
+  
+  BRIDGE_DEBUG_PRINTLN("RX timestamp=%u, now=%u\n", packet_timestamp, _rtc->getCurrentTime());
 
-  // Validate checksum
-  if (!validateChecksum(mesh_payload, payload_size, received_checksum)) {
-    BRIDGE_DEBUG_PRINTLN("RX checksum mismatch, rcv=0x%04X\n", received_checksum);
+  // Check if packet is too old
+  uint32_t now = _rtc->getCurrentTime();
+  if (now > packet_timestamp) {
+    uint32_t age_seconds = now - packet_timestamp;
+    if (age_seconds > (MQTT_PACKET_TIMEOUT / 1000)) {
+      BRIDGE_DEBUG_PRINTLN("RX packet too old, age=%d seconds, discarding\n", age_seconds);
+      return;
+    }
+  }
+
+  // Calculate payload size
+  size_t payload_size = length - BRIDGE_MAGIC_SIZE - BRIDGE_CHECKSUM_SIZE - BRIDGE_TIMESTAMP_SIZE;
+  uint8_t *mesh_payload = payload + BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE + BRIDGE_TIMESTAMP_SIZE;
+
+  // Validate checksum (over timestamp + mesh packet)
+  // Now it's contiguous memory starting from position [4]
+  uint16_t calculated_checksum = fletcher16(payload + BRIDGE_MAGIC_SIZE + BRIDGE_CHECKSUM_SIZE, BRIDGE_TIMESTAMP_SIZE + payload_size);
+  
+  if (calculated_checksum != received_checksum) {
+    BRIDGE_DEBUG_PRINTLN("RX checksum mismatch, rcv=0x%04X calc=0x%04X\n", received_checksum, calculated_checksum);
     return;
   }
 

@@ -665,7 +665,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
       , bridge(_mgr, &rtc)
 #endif
 #if defined(WITH_MQTT_BRIDGE)
-      , bridge(&_prefs, _mgr, &rtc)
+      , bridge(&_prefs, _mgr, &rtc, &self_id)
 #endif
 {
   last_millis = 0;
