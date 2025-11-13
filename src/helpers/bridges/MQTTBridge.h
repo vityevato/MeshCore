@@ -155,7 +155,7 @@ private:
   char _broker_hostname[128] = {0};
 
   // MQTT bridge packet timeout (discard packets older than this)
-  static const unsigned long MQTT_PACKET_TIMEOUT = 20000; // 20 seconds
+  static const unsigned long MQTT_PACKET_TIMEOUT = 10000; // 10 seconds
   static const size_t BRIDGE_TIMESTAMP_SIZE = sizeof(uint32_t); // 4 bytes
 
   unsigned long _last_reconnect_attempt = 0;

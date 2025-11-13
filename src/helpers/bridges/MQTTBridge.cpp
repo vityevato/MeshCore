@@ -171,6 +171,27 @@ void MQTTBridge::sendPacket(mesh::Packet *packet) {
   if (packet->isRouteDirect() && packet->path_len == 0) {
     return;
   }
+  
+  // Don't send DIRECT packets where we are NOT in the path (not a relay for this packet)
+  // This prevents forwarding packets between nodes in the same local zone
+  // Only forward DIRECT packets that actually go through us as intermediate hop
+  if (packet->isRouteDirect() && packet->path_len > 0) {
+    // Check if our hash is in the path - if not, we're not relaying this packet
+    bool we_are_in_path = false;
+    uint8_t our_hash[PATH_HASH_SIZE];
+    _self_id->copyHashTo(our_hash);
+    
+    for (uint16_t i = 0; i < packet->path_len; i += PATH_HASH_SIZE) {
+      if (memcmp(&packet->path[i], our_hash, PATH_HASH_SIZE) == 0) {
+        we_are_in_path = true;
+        break;
+      }
+    }
+    // If we're not in the path, don't forward to MQTT
+    if (!we_are_in_path) {
+      return;
+    }
+  }
 
   if (!_mqtt_client.connected()) {
     return;
