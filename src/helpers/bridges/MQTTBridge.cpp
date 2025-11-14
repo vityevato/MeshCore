@@ -530,4 +530,41 @@ void MQTTBridge::configureTLS() {
 }
 #endif
 
+void MQTTBridge::getConnectionStatus(char *status_buf) {
+  char *dp = status_buf;
+
+  // WiFi status (compact format)
+#ifdef ESP_PLATFORM
+  wl_status_t wifi_status = WiFi.status();
+
+  if (wifi_status == WL_CONNECTED) {
+    dp += sprintf(dp, "WiFi: OK (%s)\n", WiFi.localIP().toString().c_str());
+  }
+  else {
+    const char *status_str = "ERR";
+    switch (wifi_status) {
+    case WL_NO_SSID_AVAIL:
+      status_str = "NO_SSID";
+      break;
+    case WL_CONNECT_FAILED:
+      status_str = "FAILED";
+      break;
+    case WL_CONNECTION_LOST:
+      status_str = "LOST";
+      break;
+    case WL_DISCONNECTED:
+      status_str = "DISC";
+      break;
+    }
+    dp += sprintf(dp, "WiFi: %s\n", status_str);
+  }
+#else
+  dp += sprintf(dp, "WiFi: N/A\n");
+#endif
+
+  // MQTT broker connection status
+  bool mqtt_connected = _mqtt_client.connected();
+  dp += sprintf(dp, "MQTT: %s", mqtt_connected ? "OK" : "DISC");
+}
+
 #endif // WITH_MQTT_BRIDGE

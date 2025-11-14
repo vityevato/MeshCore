@@ -94,6 +94,11 @@ public:
   virtual void restartBridge() {
     // no op by default
   };
+
+  virtual void getBridgeStatus(char *status_reply) {
+    // no op by default
+    strcpy(status_reply, "N/A");
+  };
 };
 
 class CommonCLI {

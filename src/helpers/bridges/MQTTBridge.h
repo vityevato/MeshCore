@@ -131,6 +131,12 @@ public:
    */
   void onPacketReceived(mesh::Packet *packet) override;
 
+  /**
+   * Get current connection status (WiFi and MQTT broker)
+   * @param status_buf Buffer to store status string (min 128 bytes)
+   */
+  void getConnectionStatus(char *status_buf) override;
+
 private:
 
 #ifdef WITH_MQTT_TLS

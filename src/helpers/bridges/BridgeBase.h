@@ -30,6 +30,18 @@ public:
   bool isRunning() const override;
 
   /**
+   * @brief Get current connection status of the bridge
+   *
+   * Default implementation returns "N/A". Bridge implementations should override
+   * this to provide specific status information (e.g., WiFi/MQTT status for MQTTBridge).
+   *
+   * @param status_buf Buffer to store status string (min 128 bytes recommended)
+   */
+  virtual void getConnectionStatus(char *status_buf) {
+    strcpy(status_buf, "  Status: N/A");
+  }
+
+  /**
    * @brief Common magic number used by all bridge implementations for packet identification
    *
    * This magic number is placed at the beginning of bridge packets to identify

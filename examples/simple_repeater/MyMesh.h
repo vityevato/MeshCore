@@ -231,5 +231,14 @@ public:
     bridge.end();
     bridge.begin();
   }
+
+  void getBridgeStatus(char *status_reply) override {
+    if (bridge.isRunning()) {
+      bridge.getConnectionStatus(status_reply);
+    }
+    else {
+      strcpy(status_reply, "  Bridge: NOT RUNNING");
+    }
+  }
 #endif
 };

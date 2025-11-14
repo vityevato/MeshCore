@@ -261,6 +261,32 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
       } else {
         strcpy(reply, "ERR: bad pubkey");
       }
+#ifdef WITH_MQTT_BRIDGE
+    }
+    else if (memcmp(command, "show mqtt", 9) == 0) {
+      // Show all MQTT bridge settings (compact format to fit in 160 byte buffer)
+      char *dp = reply;
+
+      // Check CA certificate status
+      bool ca_exists = false;
+#ifdef ESP_PLATFORM
+      ca_exists = SPIFFS.exists("/mqtt_ca.crt");
+#elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+      ca_exists = InternalFS.exists("/mqtt_ca.crt");
+#endif
+
+      // Get runtime connection status first
+      char status_buf[64];
+      _callbacks->getBridgeStatus(status_buf);
+
+      // Compact output format
+      dp += sprintf(dp, "MQTT: %s:%d\n", _prefs->bridge_mqtt_broker, (uint32_t)_prefs->bridge_mqtt_port);
+      dp += sprintf(dp, "Topic: %s\n", _prefs->bridge_mqtt_topic);
+      dp += sprintf(dp, "TLS: %s, CA: %s\n", _prefs->bridge_mqtt_tls ? "on" : "off",
+                    ca_exists ? "YES" : "NO");
+      dp += sprintf(dp, "WiFi: %s\n", _prefs->bridge_wifi_ssid);
+      dp += sprintf(dp, "%s", status_buf);
+#endif
     } else if (memcmp(command, "tempradio ", 10) == 0) {
       strcpy(tmp, &command[10]);
       const char *parts[5];

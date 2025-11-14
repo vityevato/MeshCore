@@ -15,6 +15,32 @@ To access the CLI, use:
 
 *(Available only with `WITH_MQTT_BRIDGE`)*
 
+### Show All Settings
+
+#### `show mqtt`
+Display MQTT bridge settings and current connection status (compact format).
+
+**Example:**
+```
+show mqtt
+```
+
+**Output:**
+```
+MQTT: mqtt.example.com:8883
+Topic: meshcore/bridge
+TLS: on, CA: YES
+WiFi: MyNetwork
+WiFi: OK (192.168.1.100)
+MQTT: OK
+```
+
+**Note:** 
+- Connection status shows real-time WiFi and MQTT broker connectivity
+- Use individual `get` commands to view passwords and other detailed settings
+- WiFi status: `OK` (connected), `DISC` (disconnected), `NO_SSID`, `FAILED`, `LOST`
+- MQTT status: `OK` (connected), `DISC` (disconnected)
+
 ### MQTT Parameters
 
 #### `get mqtt.broker` / `set mqtt.broker <hostname>`
