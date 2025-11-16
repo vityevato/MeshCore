@@ -165,40 +165,27 @@ void MQTTBridge::sendPacket(mesh::Packet *packet) {
     return;
   }
 
-  // Don't send zero-hop packets (intended only for direct neighbors)
-  // MQTT bridge connects remote zones via internet, so zero-hop packets
-  // (which are meant for physical neighbors only) should not be forwarded
-  if (packet->isRouteDirect() && packet->path_len == 0) {
-    return;
-  }
-  
-  // Don't send DIRECT packets where we are NOT in the path (not a relay for this packet)
-  // This prevents forwarding packets between nodes in the same local zone
-  // Only forward DIRECT packets that actually go through us as intermediate hop
-  if (packet->isRouteDirect() && packet->path_len > 0) {
-    // Check if our hash is in the path - if not, we're not relaying this packet
-    bool we_are_in_path = false;
-    uint8_t our_hash[PATH_HASH_SIZE];
-    _self_id->copyHashTo(our_hash);
-    
-    for (uint16_t i = 0; i < packet->path_len; i += PATH_HASH_SIZE) {
-      if (memcmp(&packet->path[i], our_hash, PATH_HASH_SIZE) == 0) {
-        we_are_in_path = true;
-        break;
-      }
-    }
-    // If we're not in the path, don't forward to MQTT
-    if (!we_are_in_path) {
-      return;
-    }
-  }
+  // For DIRECT packets, we don't filter based on path_len because:
+  //
+  // bridge_pkt_src = 0 (logTx): Called AFTER hop processing, hash already removed
+  //   - path_len=0 means we're the last hop before destination
+  //   - Must forward to MQTT for remote zones
+  //
+  // bridge_pkt_src = 1 (logRx): Called BEFORE hop processing, path unchanged
+  //   - path_len=0 could mean: true zero-hop OR all hops already processed
+  //   - Cannot distinguish, so we forward to MQTT
+  //   - Worst case: extra traffic, but better than lost packets
+  //
+  // Duplicate detection via _seen_packets prevents loops in both cases
 
   if (!_mqtt_client.connected()) {
+    BRIDGE_DEBUG_PRINTLN("TX skipped: MQTT not connected\n");
     return;
   }
 
   // Check if we've already seen this packet (prevent loops)
   if (_seen_packets.hasSeen(packet)) {
+    BRIDGE_DEBUG_PRINTLN("TX skipped: duplicate packet\n");
     return;
   }
 

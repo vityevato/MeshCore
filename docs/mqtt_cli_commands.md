@@ -38,8 +38,11 @@ MQTT: OK
 **Note:** 
 - Connection status shows real-time WiFi and MQTT broker connectivity
 - Use individual `get` commands to view passwords and other detailed settings
-- WiFi status: `OK` (connected), `DISC` (disconnected), `NO_SSID`, `FAILED`, `LOST`
-- MQTT status: `OK` (connected), `DISC` (disconnected)
+- **CA status:**
+  - `YES` — Certificate verification **enabled** (from file system or compile-time)
+  - `NO` — Insecure mode (no certificate verification)
+- **WiFi status:** `OK` (connected), `DISC` (disconnected), `NO_SSID`, `FAILED`, `LOST`
+- **MQTT status:** `OK` (connected), `DISC` (disconnected)
 
 ### MQTT Parameters
 

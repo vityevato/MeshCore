@@ -267,13 +267,26 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
       // Show all MQTT bridge settings (compact format to fit in 160 byte buffer)
       char *dp = reply;
 
-      // Check CA certificate status
-      bool ca_exists = false;
+      // Check CA certificate verification status
+      // YES = certificate verification enabled (from file or compile-time)
+      // NO = insecure mode (no verification)
+      bool ca_verify = false;
+      
+      // Check if insecure mode is disabled
+      if (!_prefs->bridge_mqtt_tls_insecure) {
+        // Check if CA cert exists in file system
 #ifdef ESP_PLATFORM
-      ca_exists = SPIFFS.exists("/mqtt_ca.crt");
+        ca_verify = SPIFFS.exists("/mqtt_ca.crt");
 #elif defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-      ca_exists = InternalFS.exists("/mqtt_ca.crt");
+        ca_verify = InternalFS.exists("/mqtt_ca.crt");
 #endif
+        // If no file, check if compile-time cert is defined
+#ifdef WITH_MQTT_CA_CERT
+        if (!ca_verify) {
+          ca_verify = true; // Compile-time cert available
+        }
+#endif
+      }
 
       // Get runtime connection status first
       char status_buf[64];
@@ -283,7 +296,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
       dp += sprintf(dp, "MQTT: %s:%d\n", _prefs->bridge_mqtt_broker, (uint32_t)_prefs->bridge_mqtt_port);
       dp += sprintf(dp, "Topic: %s\n", _prefs->bridge_mqtt_topic);
       dp += sprintf(dp, "TLS: %s, CA: %s\n", _prefs->bridge_mqtt_tls ? "on" : "off",
-                    ca_exists ? "YES" : "NO");
+                    ca_verify ? "YES" : "NO");
       dp += sprintf(dp, "WiFi: %s\n", _prefs->bridge_wifi_ssid);
       dp += sprintf(dp, "%s", status_buf);
 #endif
