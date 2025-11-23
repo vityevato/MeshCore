@@ -127,6 +127,11 @@ void MQTTBridge::end() {
 }
 
 void MQTTBridge::loop() {
+  // Do nothing if bridge is not initialized
+  if (!_initialized) {
+    return;
+  }
+
   // Check free heap and log warning if low (rate limited)
   uint32_t free_heap = ESP.getFreeHeap();
   unsigned long now = millis();

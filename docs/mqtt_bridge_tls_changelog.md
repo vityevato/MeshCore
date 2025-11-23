@@ -82,8 +82,8 @@ Tested with:
 3. Some ESP32 variants may need increased stack size
 
 ## Runtime Configuration (v1.8.1+)
-- ✅ Support for certificate storage in SPIFFS/LittleFS
-- ✅ Runtime certificate loading via CLI
+- Support for certificate storage in SPIFFS/LittleFS
+- Runtime certificate loading via CLI
 - CA certificate can be uploaded to `/mqtt_ca.crt`
 - CLI commands: `get mqtt.cert.status`, `set mqtt.cert.clear`
 - Runtime certificate takes precedence over compile-time define

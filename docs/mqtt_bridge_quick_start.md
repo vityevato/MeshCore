@@ -94,13 +94,13 @@ By default, client ID is auto-generated from MAC address: `meshcore-ABC123`
 
 **Topic must NOT contain MQTT wildcards** (`#` or `+`). The bridge uses the same topic for both publishing and subscribing, so wildcards are not supported.
 
-✅ **Valid:**
+**Valid:**
 ```bash
 set mqtt.topic meshcore/bridge
 set mqtt.topic meshcore/zone1/bridge
 ```
 
-❌ **Invalid:**
+**Invalid:**
 ```bash
 set mqtt.topic meshcore/#        # Wildcard not allowed
 set mqtt.topic meshcore/+/bridge # Wildcard not allowed
@@ -251,7 +251,7 @@ set mqtt.tls off
 reboot
 ```
 
-⚠️ **Warning:** Public brokers have no authentication and no privacy. Use only for testing!
+**Warning:** Public brokers have no authentication and no privacy. Use only for testing!
 
 ## Advanced: TLS with CA Certificate
 
