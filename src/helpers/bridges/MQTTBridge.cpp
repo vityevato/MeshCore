@@ -188,9 +188,16 @@ void MQTTBridge::sendPacket(mesh::Packet *packet) {
     return;
   }
 
+#ifdef BRIDGE_DEBUG
+  uint8_t hash[MAX_HASH_SIZE];
+  packet->calculatePacketHash(hash);
+  char hash_str[MAX_HASH_SIZE * 2 + 1];
+  mesh::Utils::toHex(hash_str, hash, MAX_HASH_SIZE);
+#endif
+
   // Check if we've already seen this packet (prevent loops)
   if (_seen_packets.hasSeen(packet)) {
-    BRIDGE_DEBUG_PRINTLN("TX skipped: duplicate packet\n");
+    BRIDGE_DEBUG_PRINTLN("TX skipped: duplicate packet, type=%d hash=%s\n", packet->getPayloadType(), hash_str);
     return;
   }
 
@@ -228,8 +235,8 @@ void MQTTBridge::sendPacket(mesh::Packet *packet) {
 
   // Publish to our specific topic: <base_topic>/<repeater_id>
   if (_mqtt_client.publish(_publish_topic, _tx_buffer, total_size)) {
-    BRIDGE_DEBUG_PRINTLN("TX to %s, len=%d type=%d timestamp=%u checksum=0x%04X\n", 
-                         _publish_topic, payload_size, packet->getPayloadType(), now, checksum);
+    BRIDGE_DEBUG_PRINTLN("TX to %s, len=%d type=%d timestamp=%u checksum=0x%04X hash=%s\n", 
+                         _publish_topic, payload_size, packet->getPayloadType(), now, checksum, hash_str);
   } else {
     BRIDGE_DEBUG_PRINTLN("TX publish failed\n");
   }
@@ -446,7 +453,13 @@ void MQTTBridge::onMqttMessage(char *topic, uint8_t *payload, unsigned int lengt
     return;
   }
 
-  BRIDGE_DEBUG_PRINTLN("RX, len=%d type=%d\n", payload_size, packet->getPayloadType());
+#ifdef BRIDGE_DEBUG
+  uint8_t hash[MAX_HASH_SIZE];
+  packet->calculatePacketHash(hash);
+  char hash_str[MAX_HASH_SIZE * 2 + 1];
+  mesh::Utils::toHex(hash_str, hash, MAX_HASH_SIZE);
+  BRIDGE_DEBUG_PRINTLN("RX, len=%d type=%d hash=%s\n", payload_size, packet->getPayloadType(), hash_str);
+#endif
 
   onPacketReceived(packet);
 }
