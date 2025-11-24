@@ -80,18 +80,19 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->gps_interval, sizeof(_prefs->gps_interval));                     // 157
     file.read((uint8_t *)&_prefs->advert_loc_policy, sizeof (_prefs->advert_loc_policy));          // 161
     file.read((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162
-    // 166
-    file.read((uint8_t *)&_prefs->bridge_mqtt_broker, sizeof(_prefs->bridge_mqtt_broker));                       // 166
-    file.read((uint8_t *)&_prefs->bridge_mqtt_port, sizeof(_prefs->bridge_mqtt_port));                           // 230
-    file.read((uint8_t *)&_prefs->bridge_mqtt_topic, sizeof(_prefs->bridge_mqtt_topic));                         // 232
-    file.read((uint8_t *)&_prefs->bridge_mqtt_user, sizeof(_prefs->bridge_mqtt_user));                           // 264
-    file.read((uint8_t *)&_prefs->bridge_mqtt_password, sizeof(_prefs->bridge_mqtt_password));                   // 296
-    file.read((uint8_t *)&_prefs->bridge_mqtt_client_id, sizeof(_prefs->bridge_mqtt_client_id));                 // 328
-    file.read((uint8_t *)&_prefs->bridge_mqtt_tls, sizeof(_prefs->bridge_mqtt_tls));                             // 360
-    file.read((uint8_t *)&_prefs->bridge_mqtt_tls_insecure, sizeof(_prefs->bridge_mqtt_tls_insecure));           // 361
-    file.read((uint8_t *)&_prefs->bridge_wifi_ssid, sizeof(_prefs->bridge_wifi_ssid));                           // 362
-    file.read((uint8_t *)&_prefs->bridge_wifi_password, sizeof(_prefs->bridge_wifi_password));                   // 394
-    // 458
+    file.read((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier)); // 166
+    // 170
+    file.read((uint8_t *)&_prefs->bridge_mqtt_broker, sizeof(_prefs->bridge_mqtt_broker));                       // 170
+    file.read((uint8_t *)&_prefs->bridge_mqtt_port, sizeof(_prefs->bridge_mqtt_port));                           // 234
+    file.read((uint8_t *)&_prefs->bridge_mqtt_topic, sizeof(_prefs->bridge_mqtt_topic));                         // 236
+    file.read((uint8_t *)&_prefs->bridge_mqtt_user, sizeof(_prefs->bridge_mqtt_user));                           // 268
+    file.read((uint8_t *)&_prefs->bridge_mqtt_password, sizeof(_prefs->bridge_mqtt_password));                   // 300
+    file.read((uint8_t *)&_prefs->bridge_mqtt_client_id, sizeof(_prefs->bridge_mqtt_client_id));                 // 332
+    file.read((uint8_t *)&_prefs->bridge_mqtt_tls, sizeof(_prefs->bridge_mqtt_tls));                             // 364
+    file.read((uint8_t *)&_prefs->bridge_mqtt_tls_insecure, sizeof(_prefs->bridge_mqtt_tls_insecure));           // 365
+    file.read((uint8_t *)&_prefs->bridge_wifi_ssid, sizeof(_prefs->bridge_wifi_ssid));                           // 366
+    file.read((uint8_t *)&_prefs->bridge_wifi_password, sizeof(_prefs->bridge_wifi_password));                   // 398
+    // 462
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -104,6 +105,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->cr = constrain(_prefs->cr, 5, 8);
     _prefs->tx_power_dbm = constrain(_prefs->tx_power_dbm, 1, 30);
     _prefs->multi_acks = constrain(_prefs->multi_acks, 0, 1);
+    _prefs->adc_multiplier = constrain(_prefs->adc_multiplier, 0.0f, 10.0f);
 
     // sanitise bad bridge pref values
     _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
@@ -174,18 +176,19 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->gps_interval, sizeof(_prefs->gps_interval));                     // 157
     file.write((uint8_t *)&_prefs->advert_loc_policy, sizeof(_prefs->advert_loc_policy));           // 161
     file.write((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162
-    // 166
-    file.write((uint8_t *)&_prefs->bridge_mqtt_broker, sizeof(_prefs->bridge_mqtt_broker));                       // 166
-    file.write((uint8_t *)&_prefs->bridge_mqtt_port, sizeof(_prefs->bridge_mqtt_port));                           // 230
-    file.write((uint8_t *)&_prefs->bridge_mqtt_topic, sizeof(_prefs->bridge_mqtt_topic));                         // 232
-    file.write((uint8_t *)&_prefs->bridge_mqtt_user, sizeof(_prefs->bridge_mqtt_user));                           // 264
-    file.write((uint8_t *)&_prefs->bridge_mqtt_password, sizeof(_prefs->bridge_mqtt_password));                   // 296
-    file.write((uint8_t *)&_prefs->bridge_mqtt_client_id, sizeof(_prefs->bridge_mqtt_client_id));                 // 328
-    file.write((uint8_t *)&_prefs->bridge_mqtt_tls, sizeof(_prefs->bridge_mqtt_tls));                             // 360
-    file.write((uint8_t *)&_prefs->bridge_mqtt_tls_insecure, sizeof(_prefs->bridge_mqtt_tls_insecure));           // 361
-    file.write((uint8_t *)&_prefs->bridge_wifi_ssid, sizeof(_prefs->bridge_wifi_ssid));                           // 362
-    file.write((uint8_t *)&_prefs->bridge_wifi_password, sizeof(_prefs->bridge_wifi_password));                   // 394
-    // 458
+    file.write((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier));                 // 166
+    // 170
+    file.write((uint8_t *)&_prefs->bridge_mqtt_broker, sizeof(_prefs->bridge_mqtt_broker));                       // 170
+    file.write((uint8_t *)&_prefs->bridge_mqtt_port, sizeof(_prefs->bridge_mqtt_port));                           // 234
+    file.write((uint8_t *)&_prefs->bridge_mqtt_topic, sizeof(_prefs->bridge_mqtt_topic));                         // 236
+    file.write((uint8_t *)&_prefs->bridge_mqtt_user, sizeof(_prefs->bridge_mqtt_user));                           // 268
+    file.write((uint8_t *)&_prefs->bridge_mqtt_password, sizeof(_prefs->bridge_mqtt_password));                   // 300
+    file.write((uint8_t *)&_prefs->bridge_mqtt_client_id, sizeof(_prefs->bridge_mqtt_client_id));                 // 332
+    file.write((uint8_t *)&_prefs->bridge_mqtt_tls, sizeof(_prefs->bridge_mqtt_tls));                             // 364
+    file.write((uint8_t *)&_prefs->bridge_mqtt_tls_insecure, sizeof(_prefs->bridge_mqtt_tls_insecure));           // 365
+    file.write((uint8_t *)&_prefs->bridge_wifi_ssid, sizeof(_prefs->bridge_wifi_ssid));                           // 366
+    file.write((uint8_t *)&_prefs->bridge_wifi_password, sizeof(_prefs->bridge_wifi_password));                   // 398
+    // 462
 
     file.close();
   }
@@ -309,7 +312,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
       uint8_t sf  = num > 2 ? atoi(parts[2]) : 0;
       uint8_t cr  = num > 3 ? atoi(parts[3]) : 0;
       int temp_timeout_mins  = num > 4 ? atoi(parts[4]) : 0;
-      if (freq >= 300.0f && freq <= 2500.0f && sf >= 7 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7.0f && bw <= 500.0f && temp_timeout_mins > 0) {
+      if (freq >= 300.0f && freq <= 2500.0f && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7.0f && bw <= 500.0f && temp_timeout_mins > 0) {
         _callbacks->applyTempRadioParams(freq, bw, sf, cr, temp_timeout_mins);
         sprintf(reply, "OK - temp params for %d mins", temp_timeout_mins);
       } else {
@@ -440,6 +443,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
 #endif
         sprintf(reply, "CA: %s", ca_exists ? "YES" : "NO");
 #endif
+      } else if (memcmp(config, "adc.multiplier", 14) == 0) {
+        float adc_mult = _board->getAdcMultiplier();
+        if (adc_mult == 0.0f) {
+          strcpy(reply, "Error: unsupported by this board");
+        } else {
+          sprintf(reply, "> %.3f", adc_mult);
+        }
       } else {
         sprintf(reply, "??: %s", config);
       }
@@ -520,7 +530,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         float bw    = num > 1 ? atof(parts[1]) : 0.0f;
         uint8_t sf  = num > 2 ? atoi(parts[2]) : 0;
         uint8_t cr  = num > 3 ? atoi(parts[3]) : 0;
-        if (freq >= 300.0f && freq <= 2500.0f && sf >= 7 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7.0f && bw <= 500.0f) {
+        if (freq >= 300.0f && freq <= 2500.0f && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7.0f && bw <= 500.0f) {
           _prefs->sf = sf;
           _prefs->cr = cr;
           _prefs->freq = freq;
@@ -729,6 +739,19 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
 #endif
         strcpy(reply, success ? "OK - CA certificate cleared" : "Error clearing certificate");
 #endif
+      } else if (memcmp(config, "adc.multiplier ", 15) == 0) {
+        _prefs->adc_multiplier = atof(&config[15]);
+        if (_board->setAdcMultiplier(_prefs->adc_multiplier)) {
+          savePrefs();
+          if (_prefs->adc_multiplier == 0.0f) {
+            strcpy(reply, "OK - using default board multiplier");
+          } else {
+            sprintf(reply, "OK - multiplier set to %.3f", _prefs->adc_multiplier);
+          }
+        } else {
+          _prefs->adc_multiplier = 0.0f;
+          strcpy(reply, "Error: unsupported by this board");
+        };
       } else {
         sprintf(reply, "unknown config: %s", config);
       }
