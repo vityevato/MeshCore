@@ -2,6 +2,7 @@
 
 #include <MeshCore.h>
 #include <Arduino.h>
+#include <helpers/NRF52Board.h>
 
 // built-ins
 #define VBAT_MV_PER_LSB   (0.73242188F)   // 3.0V ADC range and 12-bit ADC resolution = 3000mV/4096
@@ -12,7 +13,7 @@
 #define PIN_VBAT_READ     (4)
 #define REAL_VBAT_MV_PER_LSB (VBAT_DIVIDER_COMP * VBAT_MV_PER_LSB)
 
-class TechoBoard : public mesh::MainBoard {
+class TechoBoard : public NRF52Board {
 protected:
   uint8_t startup_reason;
 
@@ -32,13 +33,13 @@ public:
 
   void powerOff() override {
     #ifdef LED_RED
-    digitalWrite(LED_RED, LOW);
+    digitalWrite(LED_RED, HIGH);
     #endif
     #ifdef LED_GREEN
-    digitalWrite(LED_GREEN, LOW);
+    digitalWrite(LED_GREEN, HIGH);
     #endif
     #ifdef LED_BLUE
-    digitalWrite(LED_BLUE, LOW);
+    digitalWrite(LED_BLUE, HIGH);
     #endif
     #ifdef DISP_BACKLIGHT
     digitalWrite(DISP_BACKLIGHT, LOW);
