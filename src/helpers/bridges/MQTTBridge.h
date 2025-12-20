@@ -173,6 +173,14 @@ private:
   unsigned long _last_heap_warning = 0;
   static const unsigned long HEAP_WARNING_INTERVAL = 60000; // 60 seconds
   
+  // Watchdog for MQTT connection health
+  unsigned long _last_mqtt_activity = 0;
+  static const unsigned long MQTT_ACTIVITY_TIMEOUT = 120000; // 2 minutes without activity = force reconnect
+  
+  // Counter for consecutive WiFi failures to trigger full reset
+  uint8_t _wifi_fail_count = 0;
+  static const uint8_t WIFI_FAIL_MAX = 3; // After 3 failures, do full WiFi reset
+  
   /** Buffer for building MQTT messages */
   static const size_t MAX_MQTT_PAYLOAD = BRIDGE_MAGIC_SIZE + BRIDGE_TIMESTAMP_SIZE + BRIDGE_CHECKSUM_SIZE + (MAX_TRANS_UNIT + 1);
 
@@ -201,9 +209,12 @@ private:
   void generateClientId();
 
   /**
-   * Attempt to reconnect to WiFi
+   * Connect to WiFi with optional full stack reset
+   * @param fullReset If true, performs complete WiFi stack reset (WIFI_OFF -> WIFI_STA)
+   * @param timeout_ms Connection timeout in milliseconds
+   * @return true if connected successfully
    */
-  bool reconnectWiFi();
+  bool connectWiFi(bool fullReset, unsigned long timeout_ms);
 
   /**
    * Sync time via NTP

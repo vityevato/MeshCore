@@ -72,33 +72,20 @@ void MQTTBridge::begin() {
   // Configure MQTT server
   _mqtt_client.setServer(broker, port);
 
+  // Mark as initialized FIRST so loop() can handle reconnection
+  // even if initial connection fails
+  _initialized = true;
+
   // Connect to WiFi if not already connected
   if (WiFi.status() != WL_CONNECTED) {
-    // Get WiFi credentials from prefs
-    const char *ssid = _prefs->bridge_wifi_ssid;
-    const char *password = _prefs->bridge_wifi_password;
-
-    if (ssid[0] == 0) {
-      BRIDGE_DEBUG_PRINTLN("WiFi not configured!\n");
-      return;
+    if (!connectWiFi(true, 30000)) {
+      BRIDGE_DEBUG_PRINTLN("Initial WiFi connection failed, will retry in loop()\n");
+      return; // loop() will handle reconnection
     }
-
-    WiFi.begin(ssid, password);
-    BRIDGE_DEBUG_PRINTLN("Connecting to WiFi...\n");
-
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
-      delay(100);
-      yield(); // Feed watchdog
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      BRIDGE_DEBUG_PRINTLN("WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
-      syncTimeNTP();
-    } else {
-      BRIDGE_DEBUG_PRINTLN("WiFi connection failed!\n");
-      return;
-    }
+  }
+  else {
+    // WiFi already connected, but we still need to sync time
+    syncTimeNTP();
   }
 
   // Configure TLS settings before connecting if enabled
@@ -113,9 +100,8 @@ void MQTTBridge::begin() {
   // Reset reconnect timer to allow immediate first connection attempt
   _last_reconnect_attempt = millis() - RECONNECT_INTERVAL;
 
-  // Initial connection attempt
+  // Initial connection attempt (may fail, loop() will retry)
   reconnect();
-  _initialized = true;
 }
 
 void MQTTBridge::end() {
@@ -142,16 +128,32 @@ void MQTTBridge::loop() {
 
   // Check and restore WiFi connection first
   if (WiFi.status() != WL_CONNECTED) {
-    reconnectWiFi();
+    // Rate limit reconnection attempts
+    if (now - _last_wifi_reconnect_attempt < WIFI_RECONNECT_INTERVAL) {
+      return;
+    }
+    _last_wifi_reconnect_attempt = now;
+    
+    // Use full reset after multiple failures
+    bool needFullReset = (_wifi_fail_count >= WIFI_FAIL_MAX);
+    connectWiFi(needFullReset, needFullReset ? 30000 : 10000);
     return; // No point trying MQTT without WiFi
   }
 
   // Check and restore MQTT connection
   if (!_mqtt_client.connected()) {
+    // Check if we've been disconnected too long (watchdog)
+    if (_last_mqtt_activity > 0 && (now - _last_mqtt_activity > MQTT_ACTIVITY_TIMEOUT)) {
+      BRIDGE_DEBUG_PRINTLN("MQTT activity timeout (%lu ms), forcing full WiFi reset\n", now - _last_mqtt_activity);
+      connectWiFi(true, 30000);
+      _last_mqtt_activity = now; // Reset to prevent immediate re-trigger
+      return;
+    }
     reconnect();
   }
 
   if (_mqtt_client.connected()) {
+    _last_mqtt_activity = now; // Update activity timestamp
     _mqtt_client.loop();
   }
   
@@ -161,6 +163,7 @@ void MQTTBridge::loop() {
 void MQTTBridge::sendPacket(mesh::Packet *packet) {
   // Guard against uninitialized state
   if (_initialized == false) {
+    BRIDGE_DEBUG_PRINTLN("TX skipped: bridge not initialized\n");
     return;
   }
 
@@ -256,17 +259,12 @@ void MQTTBridge::generateClientId() {
            pub_key[0], pub_key[1], pub_key[2], pub_key[3], pub_key[4], pub_key[5]);
 }
 
-bool MQTTBridge::reconnectWiFi() {
-  if (WiFi.status() == WL_CONNECTED) {
+bool MQTTBridge::connectWiFi(bool fullReset, unsigned long timeout_ms) {
+  // If not doing full reset and already connected, nothing to do
+  if (!fullReset && WiFi.status() == WL_CONNECTED) {
+    _wifi_fail_count = 0;
     return true;
   }
-
-  unsigned long now = millis();
-  if (now - _last_wifi_reconnect_attempt < WIFI_RECONNECT_INTERVAL) {
-    return false;
-  }
-
-  _last_wifi_reconnect_attempt = now;
 
   // Get WiFi credentials from prefs
   const char *ssid = _prefs->bridge_wifi_ssid;
@@ -277,24 +275,54 @@ bool MQTTBridge::reconnectWiFi() {
     return false;
   }
 
-  BRIDGE_DEBUG_PRINTLN("WiFi disconnected, attempting reconnection\n");
-  WiFi.disconnect();
+  // Disconnect MQTT before WiFi reset
+  if (_mqtt_client.connected()) {
+    _mqtt_client.disconnect();
+  }
+
+  // WiFi reset sequence
+  if (fullReset) {
+    BRIDGE_DEBUG_PRINTLN("Performing full WiFi stack reset...\n");
+    WiFi.disconnect(true);
+    delay(500);
+    WiFi.mode(WIFI_OFF);
+    delay(500);
+  }
+  else {
+    WiFi.disconnect(true);
+    delay(100);
+  }
+  
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
+  BRIDGE_DEBUG_PRINTLN("Connecting to WiFi%s...\n", fullReset ? " (full reset)" : "");
 
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 3000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < timeout_ms) {
     delay(100);
     yield(); // Feed watchdog
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    BRIDGE_DEBUG_PRINTLN("WiFi reconnected, IP: %s\n", WiFi.localIP().toString().c_str());
+    BRIDGE_DEBUG_PRINTLN("WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
+    _wifi_fail_count = 0;
     syncTimeNTP();
+    
+    // Reconfigure TLS if needed after full reset
+    if (fullReset && _prefs->bridge_mqtt_tls) {
+#ifdef WITH_MQTT_TLS
+      configureTLS();
+#endif
+    }
+    
+    // Reset MQTT reconnect timer to allow immediate reconnection
+    _last_reconnect_attempt = millis() - RECONNECT_INTERVAL;
     return true;
-  } else {
-    BRIDGE_DEBUG_PRINTLN("WiFi reconnection failed!\n");
-    return false;
   }
+  
+  _wifi_fail_count++;
+  BRIDGE_DEBUG_PRINTLN("WiFi connection failed! (fail count: %d)\n", _wifi_fail_count);
+  return false;
 }
 
 void MQTTBridge::syncTimeNTP() {
@@ -501,6 +529,9 @@ void MQTTBridge::configureTLS() {
   // This is required for modern MQTT brokers that use SNI for TLS routing
   // Must be called before setInsecure() or setCACert()
   BRIDGE_DEBUG_PRINTLN("MQTT TLS: Setting hostname for SNI: %s\n", _broker_hostname);
+  
+  // Set connection timeout to prevent blocking on TLS handshake issues
+  _wifi_client.setTimeout(15); // 15 seconds timeout for TLS operations
   
   // Check if insecure mode is enabled in prefs or compile-time define
   bool insecure = _prefs->bridge_mqtt_tls_insecure;
