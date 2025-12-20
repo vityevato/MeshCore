@@ -42,6 +42,12 @@ struct NodePrefs { // persisted to file
   uint32_t bridge_baud;   // 9600, 19200, 38400, 57600, 115200 (default 115200)
   uint8_t bridge_channel; // 1-14 (ESP-NOW only)
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
+  // Gps settings
+  uint8_t gps_enabled;
+  uint32_t gps_interval; // in seconds
+  uint8_t advert_loc_policy;
+  uint32_t discovery_mod_timestamp;
+  float adc_multiplier;
   // MQTT Bridge settings
   char bridge_mqtt_broker[64];   // MQTT broker hostname/IP
   uint16_t bridge_mqtt_port;     // MQTT port (default 1883 or 8883 for TLS)
@@ -54,12 +60,6 @@ struct NodePrefs { // persisted to file
   // WiFi settings (for MQTT bridge)
   char bridge_wifi_ssid[32];     // WiFi SSID
   char bridge_wifi_password[64]; // WiFi password
-  // Gps settings
-  uint8_t gps_enabled;
-  uint32_t gps_interval; // in seconds
-  uint8_t advert_loc_policy;
-  uint32_t discovery_mod_timestamp;
-  float adc_multiplier;
 };
 
 class CommonCLICallbacks {
