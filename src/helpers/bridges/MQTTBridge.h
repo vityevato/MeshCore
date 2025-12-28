@@ -165,10 +165,28 @@ private:
   static const size_t BRIDGE_TIMESTAMP_SIZE = sizeof(uint32_t); // 4 bytes
 
   unsigned long _last_reconnect_attempt = 0;
-  static const unsigned long RECONNECT_INTERVAL = 30000; // 30 seconds
+  static const unsigned long RECONNECT_INTERVAL = 120000; // 2 minutes
 
   unsigned long _last_wifi_reconnect_attempt = 0;
-  static const unsigned long WIFI_RECONNECT_INTERVAL = 30000; // 30 seconds
+  static const unsigned long WIFI_RECONNECT_INTERVAL = 120000; // 2 minutes
+  
+  // Non-blocking WiFi connection state machine
+  enum class WiFiConnState : uint8_t {
+    IDLE,           // Not connecting
+    DISCONNECTING,  // Waiting for disconnect to complete
+    MODE_OFF,       // WiFi mode OFF (full reset only)
+    STARTING,       // WiFi.begin() called, waiting for connection
+    CONNECTED       // Connected, ready for MQTT
+  };
+  WiFiConnState _wifi_conn_state = WiFiConnState::IDLE;
+  unsigned long _wifi_state_start = 0;  // When current state started
+  bool _wifi_full_reset = false;        // Whether doing full reset
+  
+  // Timeouts for non-blocking WiFi connection
+  static const unsigned long WIFI_DISCONNECT_TIMEOUT = 200;   // 200ms for disconnect
+  static const unsigned long WIFI_MODE_OFF_DELAY = 500;       // 500ms in OFF mode (full reset)
+  static const unsigned long WIFI_CONNECT_TIMEOUT = 15000;    // 15 seconds to connect
+  static const unsigned long WIFI_CONNECT_TIMEOUT_FULL = 30000; // 30 seconds after full reset
   
   unsigned long _last_heap_warning = 0;
   static const unsigned long HEAP_WARNING_INTERVAL = 60000; // 60 seconds
@@ -209,12 +227,16 @@ private:
   void generateClientId();
 
   /**
-   * Connect to WiFi with optional full stack reset
+   * Start non-blocking WiFi connection process
    * @param fullReset If true, performs complete WiFi stack reset (WIFI_OFF -> WIFI_STA)
-   * @param timeout_ms Connection timeout in milliseconds
-   * @return true if connected successfully
    */
-  bool connectWiFi(bool fullReset, unsigned long timeout_ms);
+  void startWiFiConnect (bool fullReset);
+  
+  /**
+   * Process WiFi connection state machine (non-blocking)
+   * @return true if connected, false if still connecting or failed
+   */
+  bool processWiFiConnect();
 
   /**
    * Sync time via NTP

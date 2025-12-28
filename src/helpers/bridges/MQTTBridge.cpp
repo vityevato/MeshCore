@@ -69,6 +69,9 @@ void MQTTBridge::begin() {
   _wifi_client.setHostname(_broker_hostname, port);
 #endif
 
+  // Set socket timeout to reduce blocking on connection attempts
+  _wifi_client.setTimeout (5); // 5 seconds instead of default 30
+
   // Configure MQTT server
   _mqtt_client.setServer(broker, port);
 
@@ -76,15 +79,17 @@ void MQTTBridge::begin() {
   // even if initial connection fails
   _initialized = true;
 
-  // Connect to WiFi if not already connected
-  if (WiFi.status() != WL_CONNECTED) {
-    if (!connectWiFi(true, 30000)) {
-      BRIDGE_DEBUG_PRINTLN("Initial WiFi connection failed, will retry in loop()\n");
-      return; // loop() will handle reconnection
-    }
+  // Start non-blocking WiFi connection if not already connected
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    startWiFiConnect (true);
+    // loop() will handle the connection process
+    return;
   }
-  else {
+  else
+  {
     // WiFi already connected, but we still need to sync time
+    _wifi_conn_state = WiFiConnState::CONNECTED;
     syncTimeNTP();
   }
 
@@ -121,43 +126,51 @@ void MQTTBridge::loop() {
   // Check free heap and log warning if low (rate limited)
   uint32_t free_heap = ESP.getFreeHeap();
   unsigned long now = millis();
-  if (free_heap < 10000 && (now - _last_heap_warning > HEAP_WARNING_INTERVAL)) {
-    BRIDGE_DEBUG_PRINTLN("WARNING: Low memory! Free heap: %d bytes\n", free_heap);
+  if (free_heap < 10000 && (now - _last_heap_warning > HEAP_WARNING_INTERVAL))
+  {
+    BRIDGE_DEBUG_PRINTLN ("WARNING: Low memory! Free heap: %d bytes\n", free_heap);
     _last_heap_warning = now;
   }
 
-  // Check and restore WiFi connection first
-  if (WiFi.status() != WL_CONNECTED) {
+  // Process WiFi connection state machine (non-blocking)
+  if (_wifi_conn_state != WiFiConnState::IDLE && _wifi_conn_state != WiFiConnState::CONNECTED)
+  {
+    processWiFiConnect();
+    return; // Still connecting, don't try MQTT yet
+  }
+
+  // Check and restore WiFi connection
+  if (WiFi.status() != WL_CONNECTED)
+  {
     // Rate limit reconnection attempts
-    if (now - _last_wifi_reconnect_attempt < WIFI_RECONNECT_INTERVAL) {
-      return;
-    }
+    if (now - _last_wifi_reconnect_attempt < WIFI_RECONNECT_INTERVAL) { return; }
     _last_wifi_reconnect_attempt = now;
     
     // Use full reset after multiple failures
     bool needFullReset = (_wifi_fail_count >= WIFI_FAIL_MAX);
-    connectWiFi(needFullReset, needFullReset ? 30000 : 10000);
+    startWiFiConnect (needFullReset);
     return; // No point trying MQTT without WiFi
   }
 
   // Check and restore MQTT connection
-  if (!_mqtt_client.connected()) {
+  if (!_mqtt_client.connected())
+  {
     // Check if we've been disconnected too long (watchdog)
-    if (_last_mqtt_activity > 0 && (now - _last_mqtt_activity > MQTT_ACTIVITY_TIMEOUT)) {
-      BRIDGE_DEBUG_PRINTLN("MQTT activity timeout (%lu ms), forcing full WiFi reset\n", now - _last_mqtt_activity);
-      connectWiFi(true, 30000);
+    if (_last_mqtt_activity > 0 && (now - _last_mqtt_activity > MQTT_ACTIVITY_TIMEOUT))
+    {
+      BRIDGE_DEBUG_PRINTLN ("MQTT activity timeout (%lu ms), forcing full WiFi reset\n", now - _last_mqtt_activity);
+      startWiFiConnect (true);
       _last_mqtt_activity = now; // Reset to prevent immediate re-trigger
       return;
     }
     reconnect();
   }
 
-  if (_mqtt_client.connected()) {
+  if (_mqtt_client.connected())
+  {
     _last_mqtt_activity = now; // Update activity timestamp
     _mqtt_client.loop();
   }
-  
-  yield(); // Feed watchdog after processing
 }
 
 void MQTTBridge::sendPacket(mesh::Packet *packet) {
@@ -259,69 +272,118 @@ void MQTTBridge::generateClientId() {
            pub_key[0], pub_key[1], pub_key[2], pub_key[3], pub_key[4], pub_key[5]);
 }
 
-bool MQTTBridge::connectWiFi(bool fullReset, unsigned long timeout_ms) {
-  // If not doing full reset and already connected, nothing to do
-  if (!fullReset && WiFi.status() == WL_CONNECTED) {
+void MQTTBridge::startWiFiConnect (bool fullReset) {
+  // If already connected and not forcing reset, nothing to do
+  if (!fullReset && WiFi.status() == WL_CONNECTED)
+  {
     _wifi_fail_count = 0;
-    return true;
+    _wifi_conn_state = WiFiConnState::CONNECTED;
+    return;
   }
 
   // Get WiFi credentials from prefs
   const char *ssid = _prefs->bridge_wifi_ssid;
-  const char *password = _prefs->bridge_wifi_password;
-
-  if (ssid[0] == 0) {
-    BRIDGE_DEBUG_PRINTLN("WiFi not configured!\n");
-    return false;
+  if (ssid[0] == 0)
+  {
+    BRIDGE_DEBUG_PRINTLN ("WiFi not configured!\n");
+    _wifi_conn_state = WiFiConnState::IDLE;
+    return;
   }
 
   // Disconnect MQTT before WiFi reset
-  if (_mqtt_client.connected()) {
-    _mqtt_client.disconnect();
-  }
+  if (_mqtt_client.connected()) { _mqtt_client.disconnect(); }
 
-  // WiFi reset sequence
-  if (fullReset) {
-    BRIDGE_DEBUG_PRINTLN("Performing full WiFi stack reset...\n");
-    WiFi.disconnect(true);
-    delay(500);
-    WiFi.mode(WIFI_OFF);
-    delay(500);
-  }
-  else {
-    WiFi.disconnect(true);
-    delay(100);
-  }
+  _wifi_full_reset = fullReset;
+  _wifi_state_start = millis();
   
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  BRIDGE_DEBUG_PRINTLN("Connecting to WiFi%s...\n", fullReset ? " (full reset)" : "");
+  // Start disconnect
+  WiFi.disconnect (true);
+  _wifi_conn_state = WiFiConnState::DISCONNECTING;
+  
+  BRIDGE_DEBUG_PRINTLN ("Starting WiFi connection%s...\n", fullReset ? " (full reset)" : "");
+}
 
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < timeout_ms) {
-    delay(100);
-    yield(); // Feed watchdog
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    BRIDGE_DEBUG_PRINTLN("WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
-    _wifi_fail_count = 0;
-    syncTimeNTP();
-    
-    // Reconfigure TLS if needed after full reset
-    if (fullReset && _prefs->bridge_mqtt_tls) {
+bool MQTTBridge::processWiFiConnect() {
+  unsigned long now = millis();
+  unsigned long elapsed = now - _wifi_state_start;
+  
+  switch (_wifi_conn_state)
+  {
+    case WiFiConnState::IDLE:
+    case WiFiConnState::CONNECTED:
+      return (_wifi_conn_state == WiFiConnState::CONNECTED);
+      
+    case WiFiConnState::DISCONNECTING:
+      // Wait for disconnect to complete (or timeout)
+      if (elapsed >= WIFI_DISCONNECT_TIMEOUT)
+      {
+        if (_wifi_full_reset)
+        {
+          BRIDGE_DEBUG_PRINTLN ("Performing full WiFi stack reset...\n");
+          WiFi.mode (WIFI_OFF);
+          _wifi_state_start = now;
+          _wifi_conn_state = WiFiConnState::MODE_OFF;
+        }
+        else
+        {
+          // Skip MODE_OFF, go directly to STARTING
+          WiFi.mode (WIFI_STA);
+          WiFi.begin (_prefs->bridge_wifi_ssid, _prefs->bridge_wifi_password);
+          _wifi_state_start = now;
+          _wifi_conn_state = WiFiConnState::STARTING;
+        }
+      }
+      break;
+      
+    case WiFiConnState::MODE_OFF:
+      // Wait in OFF mode for full reset
+      if (elapsed >= WIFI_MODE_OFF_DELAY)
+      {
+        WiFi.mode (WIFI_STA);
+        WiFi.begin (_prefs->bridge_wifi_ssid, _prefs->bridge_wifi_password);
+        _wifi_state_start = now;
+        _wifi_conn_state = WiFiConnState::STARTING;
+      }
+      break;
+      
+    case WiFiConnState::STARTING:
+    {
+      // Check if connected
+      if (WiFi.status() == WL_CONNECTED)
+      {
+        BRIDGE_DEBUG_PRINTLN ("WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
+        _wifi_fail_count = 0;
+        _wifi_conn_state = WiFiConnState::CONNECTED;
+        
+        // Sync time via NTP (this is still blocking, but only ~5 seconds max)
+        syncTimeNTP();
+        
+        // Reconfigure TLS if needed after full reset
+        if (_wifi_full_reset && _prefs->bridge_mqtt_tls)
+        {
 #ifdef WITH_MQTT_TLS
-      configureTLS();
+          configureTLS();
 #endif
+        }
+        
+        // Reset MQTT reconnect timer to allow immediate reconnection
+        _last_reconnect_attempt = millis() - RECONNECT_INTERVAL;
+        return true;
+      }
+      
+      // Check for timeout
+      unsigned long timeout = _wifi_full_reset ? WIFI_CONNECT_TIMEOUT_FULL : WIFI_CONNECT_TIMEOUT;
+      if (elapsed >= timeout)
+      {
+        _wifi_fail_count++;
+        BRIDGE_DEBUG_PRINTLN ("WiFi connection timeout! (fail count: %d)\n", _wifi_fail_count);
+        _wifi_conn_state = WiFiConnState::IDLE;
+        return false;
+      }
+      break;
     }
-    
-    // Reset MQTT reconnect timer to allow immediate reconnection
-    _last_reconnect_attempt = millis() - RECONNECT_INTERVAL;
-    return true;
   }
   
-  _wifi_fail_count++;
-  BRIDGE_DEBUG_PRINTLN("WiFi connection failed! (fail count: %d)\n", _wifi_fail_count);
   return false;
 }
 
