@@ -4,12 +4,12 @@
 #include <Arduino.h>
 #include <helpers/NRF52Board.h>
 
-class T1000eBoard : public NRF52Board {
+class T1000eBoard : public NRF52BoardDCDC {
 protected:
-  uint8_t startup_reason;
   uint8_t btn_prev_state;
 
 public:
+  T1000eBoard() : NRF52Board("T1000E_OTA") {}
   void begin();
 
   uint16_t getBattMilliVolts() override {
@@ -34,10 +34,8 @@ public:
   #endif
   }
 
-  uint8_t getStartupReason() const override { return startup_reason; }
-
   const char* getManufacturerName() const override {
-    return "Seeed Tracker T1000-e";
+    return "Seeed Tracker T1000-E";
   }
 
   int buttonStateChanged() {
@@ -92,10 +90,4 @@ public:
 
     sd_power_system_off();
   }
-
-  void reboot() override {
-    NVIC_SystemReset();
-  }
-
-//  bool startOTAUpdate(const char* id, char reply[]) override;
 };

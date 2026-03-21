@@ -24,6 +24,14 @@ static uint32_t _atoi(const char* sp) {
   return n;
 }
 
+static bool isValidName(const char *n) {
+  while (*n) {
+    if (*n == '[' || *n == ']' || *n == '\\' || *n == ':' || *n == ',' || *n == '?' || *n == '*') return false;
+    n++;
+  }
+  return true;
+}
+
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   if (fs->exists("/com_prefs")) {
     loadPrefsInt(fs, "/com_prefs");   // new filename
@@ -75,7 +83,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->bridge_baud, sizeof(_prefs->bridge_baud));                       // 131
     file.read((uint8_t *)&_prefs->bridge_channel, sizeof(_prefs->bridge_channel));                 // 135
     file.read((uint8_t *)&_prefs->bridge_secret, sizeof(_prefs->bridge_secret));                   // 136
-    file.read(pad, 4);                                                                             // 152
+    file.read((uint8_t *)&_prefs->powersaving_enabled, sizeof(_prefs->powersaving_enabled));       // 152
+    file.read(pad, 3);                                                                             // 153
     file.read((uint8_t *)&_prefs->gps_enabled, sizeof(_prefs->gps_enabled));                       // 156
     file.read((uint8_t *)&_prefs->gps_interval, sizeof(_prefs->gps_interval));                     // 157
     file.read((uint8_t *)&_prefs->advert_loc_policy, sizeof (_prefs->advert_loc_policy));          // 161
@@ -93,6 +102,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->bridge_wifi_ssid, sizeof(_prefs->bridge_wifi_ssid));                           // 366
     file.read((uint8_t *)&_prefs->bridge_wifi_password, sizeof(_prefs->bridge_wifi_password));                   // 398
     // 462
+    file.read((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                                        // 462
+    // 582
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -103,7 +114,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->bw = constrain(_prefs->bw, 7.8f, 500.0f);
     _prefs->sf = constrain(_prefs->sf, 5, 12);
     _prefs->cr = constrain(_prefs->cr, 5, 8);
-    _prefs->tx_power_dbm = constrain(_prefs->tx_power_dbm, 1, 30);
+    _prefs->tx_power_dbm = constrain(_prefs->tx_power_dbm, -9, 30);
     _prefs->multi_acks = constrain(_prefs->multi_acks, 0, 1);
     _prefs->adc_multiplier = constrain(_prefs->adc_multiplier, 0.0f, 10.0f);
 
@@ -118,6 +129,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->bridge_mqtt_port = constrain(_prefs->bridge_mqtt_port, 1, 65535);
     _prefs->bridge_mqtt_tls = constrain(_prefs->bridge_mqtt_tls, 0, 1);
     _prefs->bridge_mqtt_tls_insecure = constrain(_prefs->bridge_mqtt_tls_insecure, 0, 1);
+
+    _prefs->powersaving_enabled = constrain(_prefs->powersaving_enabled, 0, 1);
 
     _prefs->gps_enabled = constrain(_prefs->gps_enabled, 0, 1);
     _prefs->advert_loc_policy = constrain(_prefs->advert_loc_policy, 0, 2);
@@ -171,7 +184,8 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->bridge_baud, sizeof(_prefs->bridge_baud));                       // 131
     file.write((uint8_t *)&_prefs->bridge_channel, sizeof(_prefs->bridge_channel));                 // 135
     file.write((uint8_t *)&_prefs->bridge_secret, sizeof(_prefs->bridge_secret));                   // 136
-    file.write(pad, 4);                                                                             // 152
+    file.write((uint8_t *)&_prefs->powersaving_enabled, sizeof(_prefs->powersaving_enabled));       // 152
+    file.write(pad, 3);                                                                             // 153
     file.write((uint8_t *)&_prefs->gps_enabled, sizeof(_prefs->gps_enabled));                       // 156
     file.write((uint8_t *)&_prefs->gps_interval, sizeof(_prefs->gps_interval));                     // 157
     file.write((uint8_t *)&_prefs->advert_loc_policy, sizeof(_prefs->advert_loc_policy));           // 161
@@ -189,6 +203,8 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->bridge_wifi_ssid, sizeof(_prefs->bridge_wifi_ssid));                           // 366
     file.write((uint8_t *)&_prefs->bridge_wifi_password, sizeof(_prefs->bridge_wifi_password));                   // 398
     // 462
+    file.write((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                                        // 462
+    // 582
 
     file.close();
   }
@@ -219,8 +235,13 @@ uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
 void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, char* reply) {
     if (memcmp(command, "reboot", 6) == 0) {
       _board->reboot();  // doesn't return
+    } else if (memcmp(command, "clkreboot", 9) == 0) {
+      // Reset clock
+      getRTCClock()->setCurrentTime(1715770351);  // 15 May 2024, 8:50pm
+      _board->reboot();  // doesn't return
     } else if (memcmp(command, "advert", 6) == 0) {
-      _callbacks->sendSelfAdvertisement(1500);  // longer delay, give CLI response time to be sent first
+      // send flood advert
+      _callbacks->sendSelfAdvertisement(1500, true);  // longer delay, give CLI response time to be sent first
       strcpy(reply, "OK - Advert sent");
     } else if (memcmp(command, "clock sync", 10) == 0) {
       uint32_t curr = getRTCClock()->getCurrentTime();
@@ -373,8 +394,17 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         sprintf(reply, "> %d", (uint32_t)_prefs->flood_max);
       } else if (memcmp(config, "direct.txdelay", 14) == 0) {
         sprintf(reply, "> %s", StrHelper::ftoa(_prefs->direct_tx_delay_factor));
+      } else if (memcmp(config, "owner.info", 10) == 0) {
+        *reply++ = '>';
+        *reply++ = ' ';
+        const char* sp = _prefs->owner_info;
+        while (*sp) {
+          *reply++ = (*sp == '\n') ? '|' : *sp;    // translate newline back to orig '|'
+          sp++;
+        }
+        *reply = 0;  // set null terminator
       } else if (memcmp(config, "tx", 2) == 0 && (config[2] == 0 || config[2] == ' ')) {
-        sprintf(reply, "> %d", (uint32_t) _prefs->tx_power_dbm);
+        sprintf(reply, "> %d", (int32_t) _prefs->tx_power_dbm);
       } else if (memcmp(config, "freq", 4) == 0) {
         sprintf(reply, "> %s", StrHelper::ftoa(_prefs->freq));
       } else if (memcmp(config, "public.key", 10) == 0) {
@@ -450,6 +480,33 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         } else {
           sprintf(reply, "> %.3f", adc_mult);
         }
+      // Power management commands
+      } else if (memcmp(config, "pwrmgt.support", 14) == 0) {
+#ifdef NRF52_POWER_MANAGEMENT
+        strcpy(reply, "> supported");
+#else
+        strcpy(reply, "> unsupported");
+#endif
+      } else if (memcmp(config, "pwrmgt.source", 13) == 0) {
+#ifdef NRF52_POWER_MANAGEMENT
+        strcpy(reply, _board->isExternalPowered() ? "> external" : "> battery");
+#else
+        strcpy(reply, "ERROR: Power management not supported");
+#endif
+      } else if (memcmp(config, "pwrmgt.bootreason", 17) == 0) {
+#ifdef NRF52_POWER_MANAGEMENT
+        sprintf(reply, "> Reset: %s; Shutdown: %s",
+          _board->getResetReasonString(_board->getResetReason()),
+          _board->getShutdownReasonString(_board->getShutdownReason()));
+#else
+        strcpy(reply, "ERROR: Power management not supported");
+#endif
+      } else if (memcmp(config, "pwrmgt.bootmv", 13) == 0) {
+#ifdef NRF52_POWER_MANAGEMENT
+        sprintf(reply, "> %u mV", _board->getBootVoltage());
+#else
+        strcpy(reply, "ERROR: Power management not supported");
+#endif
       } else {
         sprintf(reply, "??: %s", config);
       }
@@ -480,8 +537,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         strcpy(reply, "OK");
       } else if (memcmp(config, "flood.advert.interval ", 22) == 0) {
         int hours = _atoi(&config[22]);
-        if ((hours > 0 && hours < 3) || (hours > 48)) {
-          strcpy(reply, "Error: interval range is 3-48 hours");
+        if ((hours > 0 && hours < 3) || (hours > 168)) {
+          strcpy(reply, "Error: interval range is 3-168 hours");
         } else {
           _prefs->flood_advert_interval = (uint8_t)(hours);
           _callbacks->updateFloodAdvertTimer();
@@ -502,22 +559,27 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         StrHelper::strncpy(_prefs->guest_password, &config[15], sizeof(_prefs->guest_password));
         savePrefs();
         strcpy(reply, "OK");
-      } else if (sender_timestamp == 0 &&
-                 memcmp(config, "prv.key ", 8) == 0) { // from serial command line only
+      } else if (memcmp(config, "prv.key ", 8) == 0) {
         uint8_t prv_key[PRV_KEY_SIZE];
         bool success = mesh::Utils::fromHex(prv_key, PRV_KEY_SIZE, &config[8]);
-        if (success) {
+        // only allow rekey if key is valid
+        if (success && mesh::LocalIdentity::validatePrivateKey(prv_key)) {
           mesh::LocalIdentity new_id;
           new_id.readFrom(prv_key, PRV_KEY_SIZE);
           _callbacks->saveIdentity(new_id);
-          strcpy(reply, "OK");
+          strcpy(reply, "OK, reboot to apply! New pubkey: ");
+          mesh::Utils::toHex(&reply[33], new_id.pub_key, PUB_KEY_SIZE);
         } else {
-          strcpy(reply, "Error, invalid key");
+          strcpy(reply, "Error, bad key");
         }
       } else if (memcmp(config, "name ", 5) == 0) {
-        StrHelper::strncpy(_prefs->node_name, &config[5], sizeof(_prefs->node_name));
-        savePrefs();
-        strcpy(reply, "OK");
+        if (isValidName(&config[5])) {
+          StrHelper::strncpy(_prefs->node_name, &config[5], sizeof(_prefs->node_name));
+          savePrefs();
+          strcpy(reply, "OK");
+        } else {
+          strcpy(reply, "Error, bad chars");
+        }
       } else if (memcmp(config, "repeat ", 7) == 0) {
         _prefs->disable_fwd = memcmp(&config[7], "off", 3) == 0;
         savePrefs();
@@ -584,6 +646,16 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         } else {
           strcpy(reply, "Error, cannot be negative");
         }
+      } else if (memcmp(config, "owner.info ", 11) == 0) {
+        config += 11;
+        char *dp = _prefs->owner_info;
+        while (*config && dp - _prefs->owner_info < sizeof(_prefs->owner_info)-1) {
+          *dp++ = (*config == '|') ? '\n' : *config;    // translate '|' to newline chars
+          config++;
+        }
+        *dp = 0;
+        savePrefs();
+        strcpy(reply, "OK");
       } else if (memcmp(config, "tx ", 3) == 0) {
         _prefs->tx_power_dbm = atoi(&config[3]);
         savePrefs();
@@ -882,6 +954,20 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, const char* command, ch
         strcpy(reply, "Can't find GPS");
       }
 #endif
+    } else if (memcmp(command, "powersaving on", 14) == 0) {
+      _prefs->powersaving_enabled = 1;
+      savePrefs();
+      strcpy(reply, "ok"); // TODO: to return Not supported if required
+    } else if (memcmp(command, "powersaving off", 15) == 0) {
+      _prefs->powersaving_enabled = 0;
+      savePrefs();
+      strcpy(reply, "ok");
+    } else if (memcmp(command, "powersaving", 11) == 0) {
+      if (_prefs->powersaving_enabled) {
+        strcpy(reply, "on");
+      } else {
+        strcpy(reply, "off");
+      }
     } else if (memcmp(command, "log start", 9) == 0) {
       _callbacks->setLoggingOn(true);
       strcpy(reply, "   logging on");

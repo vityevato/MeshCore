@@ -14,18 +14,10 @@
 #define REAL_VBAT_MV_PER_LSB (VBAT_DIVIDER_COMP * VBAT_MV_PER_LSB)
 
 class ThinkNodeM1Board : public NRF52Board {
-protected:
-  uint8_t startup_reason;
-
 public:
-
+  ThinkNodeM1Board() : NRF52Board("THINKNODE_M1_OTA") {}
   void begin();
   uint16_t getBattMilliVolts() override;
-  bool startOTAUpdate(const char* id, char reply[]) override;
-
-  uint8_t getStartupReason() const override {
-    return startup_reason;
-  }
 
   #if defined(P_LORA_TX_LED)
   void onBeforeTransmit() override {
@@ -38,10 +30,6 @@ public:
 
   const char* getManufacturerName() const override {
     return "Elecrow ThinkNode-M1";
-  }
-
-  void reboot() override {
-    NVIC_SystemReset();
   }
 
   void powerOff() override {

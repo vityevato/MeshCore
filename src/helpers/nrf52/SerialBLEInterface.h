@@ -13,6 +13,7 @@ class SerialBLEInterface : public BaseSerialInterface {
   bool _isDeviceConnected;
   uint16_t _conn_handle;
   unsigned long _last_health_check;
+  unsigned long _last_retry_attempt;
 
   struct Frame {
     uint8_t len;
@@ -46,11 +47,19 @@ public:
     _isDeviceConnected = false;
     _conn_handle = BLE_CONN_HANDLE_INVALID;
     _last_health_check = 0;
+    _last_retry_attempt = 0;
     send_queue_len = 0;
     recv_queue_len = 0;
   }
 
-  void begin(const char* device_name, uint32_t pin_code);
+  /**
+   * init the BLE interface.
+   * @param prefix   a prefix for the device name
+   * @param name  IN/OUT - a name for the device (combined with prefix). If "@@MAC", is modified and returned
+   * @param pin_code   the BLE security pin
+   */
+  void begin(const char* prefix, char* name, uint32_t pin_code);
+
   void disconnect();
   void enable() override;
   void disable() override;
