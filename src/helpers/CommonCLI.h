@@ -13,6 +13,11 @@
 #define ADVERT_LOC_SHARE      1
 #define ADVERT_LOC_PREFS      2
 
+#define LOOP_DETECT_OFF       0
+#define LOOP_DETECT_MINIMAL   1
+#define LOOP_DETECT_MODERATE  2
+#define LOOP_DETECT_STRICT    3
+
 struct NodePrefs { // persisted to file
   float airtime_factor;
   char node_name[32];
@@ -65,6 +70,10 @@ struct NodePrefs { // persisted to file
   char bridge_wifi_password[64]; // WiFi password
   // 462
   char owner_info[120];          // owner contact info
+  // 582
+  uint8_t rx_boosted_gain;       // power settings
+  uint8_t path_hash_mode;        // which path mode to use when sending
+  uint8_t loop_detect;
 };
 
 class CommonCLICallbacks {
@@ -104,6 +113,10 @@ public:
   virtual void getBridgeStatus(char *status_reply) {
     // no op by default
     strcpy(status_reply, "N/A");
+  };
+
+  virtual void setRxBoostedGain(bool enable) {
+    // no op by default
   };
 };
 
