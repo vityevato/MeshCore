@@ -31,7 +31,7 @@
 
 #define SHADOW_CH_SIZE             1
 #define SHADOW_MAGIC_SIZE          2
-#define SHADOW_TAG_SIZE            2
+#define SHADOW_TAG_SIZE            3
 #define SHADOW_FLAGS_SIZE          1
 #define SHADOW_COMMON_SIZE         (SHADOW_CH_SIZE + SHADOW_MAGIC_SIZE + SHADOW_TAG_SIZE + SHADOW_FLAGS_SIZE)
 
@@ -39,7 +39,7 @@
 #define SHADOW_MSG_HASH_SIZE      16
 #define SHADOW_DIGEST_SIZE        32   // full SHA-256 used for Ed25519 signing
 
-#define SHADOW_VERSION             0
+#define SHADOW_VERSION             1
 #define SHADOW_FLAG_MODE_MASK      0x03
 #define SHADOW_FLAG_VERSION_SHIFT  4
 #define SHADOW_FLAG_VERSION_MASK   0x0F
@@ -55,17 +55,18 @@
 #define SHADOW_CHANNEL_HASH        0x53
 #define SHADOW_MAGIC               0x5CC5
 
-#define SHADOW_EMBEDDED_OVERHEAD   (SHADOW_COMMON_SIZE + 1 + SIGNATURE_SIZE)          // 71
-#define SHADOW_SIG_PACKET_SIZE     (SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + SHADOW_MSG_HASH_SIZE + SIGNATURE_SIZE) // 90
-#define SHADOW_MSG_OVERHEAD        (SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 1)      // 11
-#define SHADOW_FRAG_OVERHEAD       (SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 1 + 1 + 1 + SIGNATURE_SIZE) // 77
+#define SHADOW_EMBEDDED_OVERHEAD   (SHADOW_COMMON_SIZE + 1 + SIGNATURE_SIZE)          // 72
+#define SHADOW_SIG_PACKET_SIZE     (SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + SHADOW_MSG_HASH_SIZE + SIGNATURE_SIZE) // 91
+#define SHADOW_MSG_OVERHEAD        (SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 1)      // 12
+#define SHADOW_FRAG_OVERHEAD       (SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 1 + 1 + 1 + SIGNATURE_SIZE) // 78
 
-#define SHADOW_MAX_INNER_EMBEDDED  (MAX_PACKET_PAYLOAD - SHADOW_EMBEDDED_OVERHEAD)    // 113
-#define SHADOW_MAX_INNER_MSG       (MAX_PACKET_PAYLOAD - SHADOW_MSG_OVERHEAD)         // 173
-#define SHADOW_MAX_FRAG_PAYLOAD    (MAX_PACKET_PAYLOAD - SHADOW_FRAG_OVERHEAD)        // 107
+#define SHADOW_MAX_INNER_EMBEDDED  (MAX_PACKET_PAYLOAD - SHADOW_EMBEDDED_OVERHEAD)    // 112
+#define SHADOW_MAX_INNER_MSG       (MAX_PACKET_PAYLOAD - SHADOW_MSG_OVERHEAD)         // 172
+#define SHADOW_MAX_FRAG_PAYLOAD    (MAX_PACKET_PAYLOAD - SHADOW_FRAG_OVERHEAD)        // 106
 
-// Compile-time memory profile. Define SHADOW_LOW_MEMORY for 64-128 KB MCUs.
-#ifdef SHADOW_LOW_MEMORY
+// Compile-time memory profile. Small-memory MCUs (STM32WL, 64 KB) use the low
+// profile automatically; define SHADOW_LOW_MEMORY explicitly to force it.
+#if defined(SHADOW_LOW_MEMORY) || defined(STM32_PLATFORM)
   #ifndef SHADOW_PENDING_MAX
     #define SHADOW_PENDING_MAX       8
   #endif
@@ -80,10 +81,10 @@
   #endif
 #else
   #ifndef SHADOW_PENDING_MAX
-    #define SHADOW_PENDING_MAX       20
+    #define SHADOW_PENDING_MAX       24
   #endif
   #ifndef SHADOW_VERIFIED_CACHE_SIZE
-    #define SHADOW_VERIFIED_CACHE_SIZE 160
+    #define SHADOW_VERIFIED_CACHE_SIZE 256
   #endif
   #ifndef SHADOW_SIG_CACHE_SIZE
     #define SHADOW_SIG_CACHE_SIZE    16
@@ -93,13 +94,13 @@
   #endif
 #endif
 
-#ifdef SHADOW_LOW_MEMORY
+#if defined(SHADOW_LOW_MEMORY) || defined(STM32_PLATFORM)
   #ifndef SHADOW_MAX_ALLOW
-    #define SHADOW_MAX_ALLOW         16
+    #define SHADOW_MAX_ALLOW         32
   #endif
 #else
   #ifndef SHADOW_MAX_ALLOW
-    #define SHADOW_MAX_ALLOW         32
+    #define SHADOW_MAX_ALLOW         128
   #endif
 #endif
 #ifndef SHADOW_TTL_SAMPLES

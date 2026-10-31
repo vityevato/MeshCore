@@ -299,14 +299,13 @@ bool ShadowAuth::rateAllow(TagRate* table, const uint8_t* tag, unsigned long now
   return true;
 }
 
-int ShadowAuth::findByTag(const uint8_t* tag, int* idxs, int max_idx) const {
-  int n = 0;
-  for (int i = 0; i < SHADOW_MAX_ALLOW && n < max_idx; i++) {
+bool ShadowAuth::hasAllowedTag(const uint8_t* tag) const {
+  for (int i = 0; i < SHADOW_MAX_ALLOW; i++) {
     if ((_allow[i].flags & 1) && memcmp(_allow[i].pub_key, tag, SHADOW_TAG_SIZE) == 0) {
-      idxs[n++] = i;
+      return true;
     }
   }
-  return n;
+  return false;
 }
 
 ShadowSigEntry* ShadowAuth::findSig(const uint8_t* tag, const uint8_t* sig_id, unsigned long now_ms) {
@@ -352,10 +351,10 @@ void ShadowAuth::insertSig(const uint8_t* tag, const uint8_t* sig_id,
 
 bool ShadowAuth::verifyWithCandidates(const uint8_t* tag, const uint8_t* signature,
                                       const uint8_t digest[SHADOW_DIGEST_SIZE]) {
-  int idxs[SHADOW_MAX_ALLOW];
-  int n = findByTag(tag, idxs, SHADOW_MAX_ALLOW);
-  for (int i = 0; i < n; i++) {
-    mesh::Identity id(_allow[idxs[i]].pub_key);
+  for (int i = 0; i < SHADOW_MAX_ALLOW; i++) {
+    if (!(_allow[i].flags & 1)) continue;
+    if (memcmp(_allow[i].pub_key, tag, SHADOW_TAG_SIZE) != 0) continue;
+    mesh::Identity id(_allow[i].pub_key);
     if (id.verify(signature, digest, SHADOW_DIGEST_SIZE)) {
       return true;
     }
@@ -517,8 +516,7 @@ bool ShadowAuth::filterShadow(mesh::Mesh& mesh, mesh::Packet* pkt, const uint8_t
 
   // Unknown tags are dropped before the expensive Ed25519 operation. A known
   // tag is rate-limited so one compromised node cannot monopolise the CPU.
-  int candidate;
-  if (findByTag(tag, &candidate, 1) == 0) {
+  if (!hasAllowedTag(tag)) {
     if (enforce()) { _dropped++; return true; }
     _would_drop++;
     return false;
@@ -807,18 +805,31 @@ void ShadowAuth::formatStatus(char* reply, size_t reply_len) const {
   for (int i = 0; i < SHADOW_SIG_CACHE_SIZE; i++) if (_sig[i].used) sigs++;
 
   snprintf(reply, reply_len,
-           "enforce=%d pending=%d/%d sig=%d/%d\n"
-           "msg_wait_max=%lu hold_ttl=%lu\n"
-           "sig_wait_max=%lu sig_ttl=%lu\n"
-           "frag_gap_max=%lu frag_ttl=%lu\n"
-           "dropped=%lu dup=%lu bad_sig=%lu would=%lu evict=%lu",
+           "enforce=%d pend=%d/%d sig=%d/%d allow=%d/%d\n"
+           "ttl hold=%lu sig=%lu frag=%lu\n"
+           "max msg=%lu sig=%lu frag=%lu",
            (int)prefs.enforce, pending, (int)prefs.pending_max, sigs, SHADOW_SIG_CACHE_SIZE,
-           (unsigned long)_ttl.maxMsgWait(), (unsigned long)_hold_ttl_ms,
-           (unsigned long)_ttl.maxSigWait(), (unsigned long)_sig_ttl_ms,
-           (unsigned long)_ttl.maxFragGap(), (unsigned long)_frag_ttl_ms,
-           (unsigned long)_dropped, (unsigned long)_dup_fast,
-           (unsigned long)_bad_sig, (unsigned long)_would_drop,
-           (unsigned long)_pending_evicted);
+           getNumAllowed(), SHADOW_MAX_ALLOW,
+           (unsigned long)_hold_ttl_ms, (unsigned long)_sig_ttl_ms,
+           (unsigned long)_frag_ttl_ms,
+           (unsigned long)_ttl.maxMsgWait(), (unsigned long)_ttl.maxSigWait(),
+           (unsigned long)_ttl.maxFragGap());
+}
+
+void ShadowAuth::formatStats(char* reply, size_t reply_len) const {
+  formatCounters(reply, reply_len, _dropped, _dup_fast, _bad_sig,
+                 _would_drop, _pending_evicted);
+}
+
+void ShadowAuth::formatCounters(char* reply, size_t reply_len,
+                                uint32_t dropped, uint32_t dup_fast,
+                                uint32_t bad_sig, uint32_t would_drop,
+                                uint32_t pending_evicted) {
+  snprintf(reply, reply_len,
+           "drop=%lu dup=%lu bad=%lu would=%lu evict=%lu",
+           (unsigned long)dropped, (unsigned long)dup_fast,
+           (unsigned long)bad_sig, (unsigned long)would_drop,
+           (unsigned long)pending_evicted);
 }
 
 static bool parseOnOff(const char* value, bool* out) {
@@ -923,6 +934,10 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
   }
   if (strcmp(name, "shd.status") == 0) {
     formatStatus(reply, reply_len);
+    return true;
+  }
+  if (strcmp(name, "shd.stats") == 0) {
+    formatStats(reply, reply_len);
     return true;
   }
   if (strcmp(name, "shd.list") == 0) {

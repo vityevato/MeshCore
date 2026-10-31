@@ -811,9 +811,9 @@ transit-packet rate limit. The policy is enforced while `shd.enforce on`.
 - `shd.pending.max <n>`
 
 **Parameters:**
-- `n`: 1..20 (1..8 with `SHADOW_LOW_MEMORY`)
+- `n`: 1..24 (1..8 with `SHADOW_LOW_MEMORY` or on `STM32_PLATFORM`)
 
-**Default:** `20`
+**Default:** `24`
 
 ---
 
@@ -832,6 +832,18 @@ transit-packet rate limit. The policy is enforced while `shd.enforce on`.
 **Usage:**
 - `shd.status`
 
+Reports enforcement, pending/signature cache usage, allowlist usage
+(`allow=used/max`), observed delays and current TTLs.
+
+---
+
+#### Show shadow counters
+**Usage:**
+- `shd.stats`
+
+Reports the repeater drop counters: `drop=... dup=... bad=... would=...
+evict=...`.
+
 ---
 
 #### Allowlist management
@@ -840,8 +852,10 @@ transit-packet rate limit. The policy is enforced while `shd.enforce on`.
 - `shd.remove <pubkey-hex>`
 - `shd.list`
 
-`pubkey-hex` is the full 32-byte public key (64 hex characters). `shd.list`
-prints the keys on the local serial console.
+`pubkey-hex` is the full 32-byte public key (64 hex characters). The normal
+profile stores up to 128 keys (32 with the low-memory profile). When the list
+is full, `shd.allow` returns `Err - allowlist full`; remove entries with
+`shd.remove`. `shd.list` prints the keys on the local serial console.
 
 ---
 

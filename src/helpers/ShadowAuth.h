@@ -126,7 +126,7 @@ class ShadowAuth {
 
   void updateTtls();
   bool rateAllow(TagRate* table, const uint8_t* tag, unsigned long now_ms, uint16_t max_per_min);
-  int  findByTag(const uint8_t* tag, int* idxs, int max_idx) const;
+  bool hasAllowedTag(const uint8_t* tag) const;
   ShadowSigEntry* findSig(const uint8_t* tag, const uint8_t* sig_id, unsigned long now_ms);
   void insertSig(const uint8_t* tag, const uint8_t* sig_id, const uint8_t* msg_hash, unsigned long now_ms);
   void releasePending(mesh::Mesh& mesh, int idx);
@@ -182,5 +182,10 @@ public:
   static int oldestSigSlot(const ShadowSigEntry* entries, int count);
 
   void formatStatus(char* reply, size_t reply_len) const;
+  void formatStats(char* reply, size_t reply_len) const;
+  static void formatCounters(char* reply, size_t reply_len,
+                             uint32_t dropped, uint32_t dup_fast,
+                             uint32_t bad_sig, uint32_t would_drop,
+                             uint32_t pending_evicted);
   bool handleCommand(mesh::Mesh& mesh, const char* command, char* reply, size_t reply_len);
 };

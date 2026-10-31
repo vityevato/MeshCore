@@ -77,7 +77,7 @@ inline void sha256Digest(uint8_t out[SHADOW_DIGEST_SIZE], const uint8_t* buf, si
   mesh::Utils::sha256(out, SHADOW_DIGEST_SIZE, buf, (int)len);
 }
 
-// Embedded: common(6) + inner_type(1) + inner_payload + signature(64)
+// Embedded: common(7) + inner_type(1) + inner_payload + signature(64)
 inline bool digestEmbedded(uint8_t out[SHADOW_DIGEST_SIZE], uint8_t header, uint8_t path_mode,
                            const uint8_t* payload, uint16_t payload_len) {
   if (payload_len < SHADOW_EMBEDDED_OVERHEAD) return false;
@@ -89,7 +89,7 @@ inline bool digestEmbedded(uint8_t out[SHADOW_DIGEST_SIZE], uint8_t header, uint
   return true;
 }
 
-// Signature packet: common(6) + sig_id(4) + msg_hash(16) + signature(64)
+// Signature packet: common(7) + sig_id(4) + msg_hash(16) + signature(64)
 inline bool digestSignature(uint8_t out[SHADOW_DIGEST_SIZE], uint8_t header, uint8_t path_mode,
                             const uint8_t* payload, uint16_t payload_len) {
   if (payload_len != SHADOW_SIG_PACKET_SIZE) return false;
@@ -101,7 +101,7 @@ inline bool digestSignature(uint8_t out[SHADOW_DIGEST_SIZE], uint8_t header, uin
   return true;
 }
 
-// Message packet: common(6) + sig_id(4) + inner_type(1) + inner_payload
+// Message packet: common(7) + sig_id(4) + inner_type(1) + inner_payload
 inline bool digestMessage(uint8_t out[SHADOW_DIGEST_SIZE], uint8_t header, uint8_t path_mode,
                           const uint8_t* payload, uint16_t payload_len) {
   if (payload_len < SHADOW_MSG_OVERHEAD) return false;
@@ -112,7 +112,7 @@ inline bool digestMessage(uint8_t out[SHADOW_DIGEST_SIZE], uint8_t header, uint8
   return true;
 }
 
-// Fragment: common(6) + frag_id(4) + index(1) + count(1) + inner_type(1)
+// Fragment: common(7) + frag_id(4) + index(1) + count(1) + inner_type(1)
 //           + frag_payload + signature(64)
 inline bool digestFragment(uint8_t out[SHADOW_DIGEST_SIZE], uint8_t header, uint8_t path_mode,
                            const uint8_t* payload, uint16_t payload_len) {

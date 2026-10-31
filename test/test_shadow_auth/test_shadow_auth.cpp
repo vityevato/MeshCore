@@ -6,6 +6,8 @@
 #include <helpers/RegionMap.h>
 
 #include <string.h>
+#include <stdio.h>
+#include <stdint.h>
 
 using namespace mesh;
 
@@ -202,14 +204,19 @@ static void copyRaw(const Packet* src, Packet* dst) {
 } // namespace
 
 TEST(ShadowConstants, SizesMatchPlan) {
-  EXPECT_EQ(SHADOW_COMMON_SIZE, 6);
-  EXPECT_EQ(SHADOW_EMBEDDED_OVERHEAD, 71);
-  EXPECT_EQ(SHADOW_SIG_PACKET_SIZE, 90);
-  EXPECT_EQ(SHADOW_MSG_OVERHEAD, 11);
-  EXPECT_EQ(SHADOW_FRAG_OVERHEAD, 77);
-  EXPECT_EQ(SHADOW_MAX_INNER_EMBEDDED, 113);
-  EXPECT_EQ(SHADOW_MAX_INNER_MSG, 173);
-  EXPECT_EQ(SHADOW_MAX_FRAG_PAYLOAD, 107);
+  EXPECT_EQ(SHADOW_TAG_SIZE, 3);
+  EXPECT_EQ(SHADOW_VERSION, 1);
+  EXPECT_EQ(SHADOW_MAX_ALLOW, 128);
+  EXPECT_EQ(SHADOW_PENDING_MAX, 24);
+  EXPECT_EQ(SHADOW_VERIFIED_CACHE_SIZE, 256);
+  EXPECT_EQ(SHADOW_COMMON_SIZE, 7);
+  EXPECT_EQ(SHADOW_EMBEDDED_OVERHEAD, 72);
+  EXPECT_EQ(SHADOW_SIG_PACKET_SIZE, 91);
+  EXPECT_EQ(SHADOW_MSG_OVERHEAD, 12);
+  EXPECT_EQ(SHADOW_FRAG_OVERHEAD, 78);
+  EXPECT_EQ(SHADOW_MAX_INNER_EMBEDDED, 112);
+  EXPECT_EQ(SHADOW_MAX_INNER_MSG, 172);
+  EXPECT_EQ(SHADOW_MAX_FRAG_PAYLOAD, 106);
 }
 
 TEST(ShadowVerifiedCache, InsertContainsEvicts) {
@@ -222,7 +229,9 @@ TEST(ShadowVerifiedCache, InsertContainsEvicts) {
 
   for (int i = 0; i < SHADOW_VERIFIED_CACHE_SIZE + 3; i++) {
     uint8_t x[SHADOW_MSG_HASH_SIZE];
-    memset(x, (uint8_t)(i + 1), sizeof(x));
+    memset(x, 0xAB, sizeof(x));
+    x[0] = (uint8_t)i;
+    x[1] = (uint8_t)(i >> 8);
     cache.insert(x);
   }
   EXPECT_FALSE(cache.contains(h));   // evicted
@@ -253,6 +262,108 @@ TEST(ShadowAuth, AllowListAddRemove) {
   EXPECT_EQ(auth.getNumAllowed(), 1);
   EXPECT_TRUE(auth.remove(pub));
   EXPECT_FALSE(auth.contains(pub));
+}
+
+TEST(ShadowAuth, AllowListCapacity) {
+  ShadowAuth auth;
+  auth.begin();
+
+  uint8_t pub[PUB_KEY_SIZE];
+  for (int i = 0; i < SHADOW_MAX_ALLOW; i++) {
+    memset(pub, 0, sizeof(pub));
+    pub[0] = (uint8_t)(i >> 8);
+    pub[1] = (uint8_t)i;
+    pub[2] = 0x5A;
+    ASSERT_TRUE(auth.allow(pub)) << "slot " << i;
+  }
+  EXPECT_EQ(auth.getNumAllowed(), SHADOW_MAX_ALLOW);
+
+  uint8_t extra[PUB_KEY_SIZE];
+  memset(extra, 0xFF, sizeof(extra));
+  EXPECT_FALSE(auth.allow(extra));
+  EXPECT_EQ(auth.getNumAllowed(), SHADOW_MAX_ALLOW);
+
+  uint8_t first[PUB_KEY_SIZE];
+  memset(first, 0, sizeof(first));
+  first[2] = 0x5A;
+  ASSERT_TRUE(auth.remove(first));
+  EXPECT_EQ(auth.getNumAllowed(), SHADOW_MAX_ALLOW - 1);
+  EXPECT_TRUE(auth.allow(extra));
+  EXPECT_EQ(auth.getNumAllowed(), SHADOW_MAX_ALLOW);
+}
+
+TEST(ShadowAuth, StatusIncludesAllowListAndFits) {
+  ShadowAuth auth;
+  auth.begin();
+  uint8_t pub[PUB_KEY_SIZE];
+  memset(pub, 0x42, sizeof(pub));
+  ASSERT_TRUE(auth.allow(pub));
+
+  char buf[160];
+  memset(buf, 0, sizeof(buf));
+  auth.formatStatus(buf, sizeof(buf));
+
+  EXPECT_LT(strlen(buf), sizeof(buf));
+  char expected[32];
+  snprintf(expected, sizeof(expected), "allow=1/%d", SHADOW_MAX_ALLOW);
+  EXPECT_NE(strstr(buf, expected), nullptr);
+  // Counters live in shd.stats now; status must stay short and stable.
+  EXPECT_EQ(strstr(buf, "drop="), nullptr);
+  EXPECT_EQ(strstr(buf, "evict="), nullptr);
+}
+
+TEST(ShadowAuth, StatsFitLargeCounters) {
+  char buf[160];
+  ShadowAuth::formatCounters(buf, sizeof(buf),
+                             UINT32_MAX, UINT32_MAX, UINT32_MAX,
+                             UINT32_MAX, UINT32_MAX);
+  EXPECT_LT(strlen(buf), sizeof(buf));
+  EXPECT_NE(strstr(buf, "drop=4294967295"), nullptr);
+  EXPECT_NE(strstr(buf, "evict=4294967295"), nullptr);
+}
+
+TEST(ShadowAuth, StatsCommandReportsCounters) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc;
+  TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+
+  ShadowAuth auth;
+  auth.begin();
+  char buf[160];
+  ASSERT_TRUE(auth.handleCommand(mesh, "shd.stats", buf, sizeof(buf)));
+  EXPECT_NE(strstr(buf, "drop=0"), nullptr);
+  EXPECT_NE(strstr(buf, "evict=0"), nullptr);
+}
+
+TEST(ShadowAuth, TagCollisionTriesAllCandidates) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+  mesh.setShadowSendHook(&node);
+
+  ShadowAuth auth;
+  auth.begin();
+  auth.getPrefs().enabled = 1;
+  auth.getPrefs().enforce = 1;
+
+  // Add a fake key sharing the sender's 3-byte tag *before* the real key, so
+  // verification has to iterate past the first candidate.
+  uint8_t fake[PUB_KEY_SIZE];
+  memcpy(fake, mesh.self_id.pub_key, PUB_KEY_SIZE);
+  fake[PUB_KEY_SIZE - 1] ^= 0xFF;
+  ASSERT_EQ(memcmp(fake, mesh.self_id.pub_key, SHADOW_TAG_SIZE), 0);
+  ASSERT_TRUE(auth.allow(fake));
+  ASSERT_TRUE(auth.allow(mesh.self_id.pub_key));
+
+  const uint8_t payload[] = "tag collision";
+  Packet* out = wrapOne(mesh, mgr, payload, sizeof(payload));
+  ASSERT_NE(out, nullptr);
+
+  Packet parsed;
+  copyRaw(out, &parsed);
+  EXPECT_FALSE(auth.filter(mesh, &parsed));
+  EXPECT_TRUE(parsed.auth_ok);
 }
 
 TEST(ShadowAuth, EmbeddedPacketAcceptedAndMarkedAuth) {
@@ -1498,7 +1609,7 @@ TEST(ShadowAuth, FragmentAdvertFromUnknownDropped) {
   p.header = (uint8_t)((PAYLOAD_TYPE_GRP_TXT << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD);
   p.path_len = 0;
   p.payload_len = SHADOW_FRAG_OVERHEAD + 4;
-  uint8_t tag[SHADOW_TAG_SIZE] = { 0xAA, 0xBB };
+  uint8_t tag[SHADOW_TAG_SIZE] = { 0xAA, 0xBB, 0xCC };
   shadow::writeCommon(p.payload, tag, SHADOW_MODE_FRAGMENT);
 
   EXPECT_TRUE(auth.filter(mesh, &p));

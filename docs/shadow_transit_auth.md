@@ -17,18 +17,18 @@ the shadow header:
 ```text
 0: shadow_ch   1   fixed 0x53
 1: magic       2   fixed 0x5CC5
-3: tag         2   first two bytes of the source public key
-5: flags       1   version (high 4 bits) + mode (low 2 bits)
+3: tag         3   first three bytes of the source public key
+6: flags       1   version (high 4 bits) + mode (low 2 bits)
 ```
 
 Modes:
 
 | Mode | Flags | Format | Overhead | Max inner |
 |---|---|---:|---:|---:|
-| embedded | 0 | `[common][inner_type][inner_payload][sig 64]` | 71 | 113 |
+| embedded | 0 | `[common][inner_type][inner_payload][sig 64]` | 72 | 112 |
 | signature | 1 | `[common][sig_id 4][msg_hash 16][sig 64]` | - | - |
-| message | 2 | `[common][sig_id 4][inner_type][inner_payload]` | 11 | 173 |
-| fragment | 3 | `[common][frag_id 4][index 1][count 1][inner_type 1][chunk][sig 64]` | 77/fragment | 107/fragment |
+| message | 2 | `[common][sig_id 4][inner_type][inner_payload]` | 12 | 172 |
+| fragment | 3 | `[common][frag_id 4][index 1][count 1][inner_type 1][chunk][sig 64]` | 78/fragment | 106/fragment |
 
 `msg_hash` is the first 16 bytes of a SHA-256 digest. `sig_id` and `frag_id`
 are 4-byte counters seeded from the RNG at boot. Every fragment is signed
@@ -63,7 +63,7 @@ unauthorized floods do not consume the packet pool or the delayed queue.
 ### Detached messages
 
 A Message packet can arrive before its Signature packet. The repeater holds it
-in a compact pending buffer (default 20 entries, not `Packet` pool objects) and
+in a compact pending buffer (default 24 entries, not `Packet` pool objects) and
 releases it when the matching signature arrives. Messages are only held for
 allowlisted tags.
 
@@ -100,8 +100,8 @@ Shadow-enabled nodes and repeaters wrap their own adverts. The inner payload is
 the normal `ADVERT` (`pubkey 32 + timestamp 4 + signature 64 + app_data`), so it
 keeps its own Ed25519 signature.
 
-- Inner length up to 113 bytes: `embedded`, one packet.
-- Longer inner (114..132): `message`/detached, signature packet + message.
+- Inner length up to 112 bytes: `embedded`, one packet.
+- Longer inner (113..132): `message`/detached, signature packet + message.
 - Adverts are never fragmented, even if `shd.mode fragment` is forced.
 
 Policy:
@@ -124,7 +124,7 @@ trust anchor and is not checked; path bytes, path hash size and outer
 transport codes are routing metadata and are not authenticated for adverts.
 For detached adverts from an unknown sender, enforcing repeaters drop the
 separate shadow signature packet, but the message packet still passes because
-the advert is self-authenticating. This costs one extra 90-byte signature
+the advert is self-authenticating. This costs one extra 91-byte signature
 packet; it does not affect correctness.
 
 Ordinary adverts are signature-checked by `Mesh` for flood and zero-hop
@@ -170,12 +170,13 @@ shd.enforce on|off          default off
 shd.allow.anon on|off       default on
 shd.allow.advert on|off     default off (only allowlisted adverts)
 shd.auto.add on|off         default on
-shd.pending.max <n>         default 20
+shd.pending.max <n>         default 24
 shd.hold.min <ms>           default 45000
 shd.hold.max <ms>           default 180000
 shd.hold.default <ms>       default 60000
 shd.margin <ms>             default 2000
 shd.status
+shd.stats
 shd.allow <pubkey-hex>
 shd.remove <pubkey-hex>
 shd.list
@@ -189,18 +190,20 @@ shd.mode auto|embedded|detached|fragment
 shd.status
 ```
 
-`shd.status` on a repeater reports enforcement, pending/signature cache usage,
-observed delays, current TTLs and drop counters. On a node it reports the
-mode, counters and fragment reassembly state.
+`shd.status` on a repeater reports enforcement, pending/signature/allowlist
+usage, observed delays and current TTLs. `shd.stats` reports the drop
+counters. On a node `shd.status` reports the mode, counters and fragment
+reassembly state.
 
-The allowlist is stored in `/shadow_acl`; settings and TTL estimates are stored
-in `/shadow_prefs`.
+The allowlist is stored in `/shadow_acl`. The normal profile keeps 128
+public keys (32 on the low-memory profile); when full, `shd.allow` returns
+`Err - allowlist full` and entries must be freed with `shd.remove`.
 
 ## 160-byte text
 
 A 160-byte chat message produces an inner payload of about 180 bytes, which is
-larger than the detached message limit (173). The companion automatically uses
-fragment mode: two fragments of at most 107 bytes. The receiving companion
+larger than the detached message limit (172). The companion automatically uses
+fragment mode: two fragments of at most 106 bytes. The receiving companion
 reassembles them and the application still sees the original 160-byte text.
 The companion adds 2 seconds to its send timeouts while shadow mode is enabled,
 covering the signature packet delay and one extra fragment.
@@ -211,15 +214,18 @@ Default profile:
 
 | Component | Approx. size |
 |---|---:|
-| pending 20 | ~6 KB |
-| VerifiedHashCache 160 x 16 | ~2.7 KB |
+| pending 24 | ~7 KB |
+| VerifiedHashCache 256 x 16 | ~4.3 KB |
 | SignatureCache 16 | ~0.5 KB |
 | fragment reassembly 4 | ~0.9 KB |
-| **Total** | **~10 KB** |
+| allowlist 128 | ~5 KB |
+| TTL tracker, prefs, rate tables | ~0.8 KB |
+| **Total** | **~18 KB** |
 
-For 64-128 KB MCUs compile with `-DSHADOW_LOW_MEMORY`:
-pending 8, verified cache 64, signature cache 8, fragment reassembly 2
-(~3-4 KB).
+For 64-128 KB MCUs the low profile is selected automatically on
+`STM32_PLATFORM`, or explicitly with `-DSHADOW_LOW_MEMORY`:
+pending 8, verified cache 64, signature cache 8, fragment reassembly 2,
+allowlist 32 (~6 KB).
 
 ## Compatibility and limitations
 
