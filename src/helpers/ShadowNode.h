@@ -58,6 +58,7 @@ class ShadowNode : public mesh::ShadowSendHook, public mesh::ShadowRecvHook {
 
   uint32_t _sent, _recv, _frags_recv, _dropped;
 
+  bool drop(const char* reason, const mesh::Packet* packet, const uint8_t* tag = NULL);
   bool shouldWrap(const mesh::Packet* packet) const;
   void nextSigId(uint8_t* dest);
   void nextFragId(uint8_t* dest);

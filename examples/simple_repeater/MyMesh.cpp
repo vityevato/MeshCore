@@ -444,7 +444,9 @@ bool MyMesh::filterRecvPacket(mesh::Packet* packet) {
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   if (_prefs.disable_fwd) return false;
   if (shadow_auth.enabled() && shadow_auth.enforce() && !packet->auth_ok) {
-    MESH_DEBUG_PRINTLN("allowPacketForward: shadow source not authorized");
+    MESH_DEBUG_PRINTLN("SHADOW FWD DROP reason=unauthorized type=%d route=%c len=%d shadow=%d auth_ok=%d",
+                       packet->getPayloadType(), packet->isRouteDirect() ? 'D' : 'F',
+                       packet->payload_len, (int)packet->shadow, (int)packet->auth_ok);
     return false;
   }
   if (packet->isRouteFlood()
@@ -469,6 +471,9 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
       return false;
     }
   }
+  SHADOW_TRACE_PRINTLN("SHADOW FWD ALLOW type=%d route=%c len=%d shadow=%d auth_ok=%d",
+                       packet->getPayloadType(), packet->isRouteDirect() ? 'D' : 'F',
+                       packet->payload_len, (int)packet->shadow, (int)packet->auth_ok);
   return true;
 }
 
@@ -969,15 +974,17 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // allowlist. Without this, enabling enforcement would lock them out until
   // their next login; repeating it every boot would undo shd.remove.
   if (!shadow_auth.getPrefs().acl_migrated) {
+    int migrated = 0;
     for (int i = 0; i < acl.getNumClients(); i++) {
       auto c = acl.getClientByIdx(i);
       if (c->permissions == 0) continue;   // deleted / transient guest
       if (!shadow_auth.contains(c->id.pub_key)) {
-        shadow_auth.allow(c->id.pub_key, c->last_activity);
+        if (shadow_auth.allow(c->id.pub_key, c->last_activity)) migrated++;
       }
     }
     shadow_auth.getPrefs().acl_migrated = 1;
     shadow_auth.markPrefsDirty();
+    MESH_DEBUG_PRINTLN("SHADOW: ACL migration added %d keys", migrated);
   }
   shadow_node.setEnabled(shadow_auth.enabled());
   shadow_node.setUnwrapAll(false);   // repeater: only unwrap local traffic

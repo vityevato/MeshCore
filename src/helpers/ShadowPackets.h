@@ -2,7 +2,15 @@
 
 #include <Packet.h>
 #include <Utils.h>
+#include <stdio.h>
 #include <string.h>
+
+#if MESH_PACKET_LOGGING && ARDUINO
+  #include <Arduino.h>
+  #define SHADOW_TRACE_PRINTLN(F, ...) Serial.printf("SHADOW TRACE: " F "\n", ##__VA_ARGS__)
+#else
+  #define SHADOW_TRACE_PRINTLN(...) {}
+#endif
 
 namespace shadow {
 
@@ -18,6 +26,17 @@ inline void tagOf(const uint8_t* pub_key, uint8_t* tag) {
 
 inline uint8_t modeOf(uint8_t shadow_flags) {
   return shadow_flags & SHADOW_FLAG_MODE_MASK;
+}
+
+inline const char* modeName(uint8_t mode) {
+  switch (mode) {
+    case SHADOW_MODE_EMBEDDED: return "EMB";
+    case SHADOW_MODE_SIGNATURE: return "SIG";
+    case SHADOW_MODE_MESSAGE: return "MSG";
+    case SHADOW_MODE_FRAGMENT: return "FRAG";
+    case SHADOW_MODE_AUTO: return "AUTO";
+    default: return "?";
+  }
 }
 
 inline uint8_t versionOf(uint8_t shadow_flags) {

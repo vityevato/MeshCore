@@ -19,23 +19,44 @@ ShadowNode::ShadowNode(mesh::LocalIdentity& self, mesh::RNG& rng)
   _rng.random((uint8_t*)&_frag_id, sizeof(_frag_id));
 }
 
+bool ShadowNode::drop(const char* reason, const mesh::Packet* packet, const uint8_t* tag) {
+  _dropped++;
+  char tag_buf[2 * SHADOW_TAG_SIZE + 1];
+  if (tag != NULL) {
+    mesh::Utils::toHex(tag_buf, tag, SHADOW_TAG_SIZE);
+  } else {
+    snprintf(tag_buf, sizeof(tag_buf), "---");
+  }
+  MESH_DEBUG_PRINTLN("SHADOW RX DROP reason=%s type=%d route=%c len=%d tag=%s",
+                     reason, packet->getPayloadType(), packet->isRouteDirect() ? 'D' : 'F',
+                     packet->payload_len, tag_buf);
+  return true;
+}
+
 void ShadowNode::setMode(uint8_t mode) {
   if (mode > SHADOW_MODE_FRAGMENT || mode == SHADOW_MODE_SIGNATURE) mode = SHADOW_MODE_AUTO;
-  _mode = mode;
+  if (mode != _mode) {
+    SHADOW_TRACE_PRINTLN("SHADOW: mode %s -> %s", shadow::modeName(_mode), shadow::modeName(mode));
+    _mode = mode;
+  }
 }
 
 void ShadowNode::setTransportKey(const uint8_t* key) {
+  bool was_valid = _scope_valid;
   if (key == NULL) {
     _scope_valid = false;
     memset(_scope_key, 0, sizeof(_scope_key));
-    return;
+  } else {
+    memcpy(_scope_key, key, sizeof(_scope_key));
+    _scope_valid = true;
+    for (int i = 0; i < (int)sizeof(_scope_key); i++) {
+      if (_scope_key[i] != 0) break;
+      if (i == (int)sizeof(_scope_key) - 1) _scope_valid = false;   // all-zero key means unscoped
+    }
   }
-  memcpy(_scope_key, key, sizeof(_scope_key));
-  _scope_valid = true;
-  for (int i = 0; i < (int)sizeof(_scope_key); i++) {
-    if (_scope_key[i] != 0) return;
+  if (was_valid != _scope_valid) {
+    MESH_DEBUG_PRINTLN("SHADOW: transport scope %s", _scope_valid ? "set" : "cleared");
   }
-  _scope_valid = false;   // all-zero key means unscoped
 }
 
 uint16_t ShadowNode::calcOuterCode(const mesh::Packet* out) const {
@@ -48,6 +69,8 @@ uint16_t ShadowNode::calcOuterCode(const mesh::Packet* out) const {
   sha.finalizeHMAC(_scope_key, sizeof(_scope_key), (uint8_t*)&code, 2);
   if (code == 0) code = 1;
   else if (code == 0xFFFF) code = 0xFFFE;
+  SHADOW_TRACE_PRINTLN("SHADOW TX transport code=%04X type=%d len=%d",
+                       (unsigned)code, out->getPayloadType(), out->payload_len);
   return code;
 }
 
@@ -87,6 +110,12 @@ void ShadowNode::prepareOuter(mesh::Packet* out, const mesh::Packet* inner, uint
 }
 
 void ShadowNode::sendShadow(mesh::Mesh& mesh, mesh::Packet* out, uint8_t priority, uint32_t delay_millis) {
+  SHADOW_TRACE_PRINTLN("SHADOW TX send mode=%s len=%d priority=%d delay=%lu tag=%02X%02X%02X",
+                       shadow::modeName(shadow::modeOf(out->shadow_flags)),
+                       out->payload_len, (int)priority, (unsigned long)delay_millis,
+                       out->payload[SHADOW_CH_SIZE + SHADOW_MAGIC_SIZE],
+                       out->payload[SHADOW_CH_SIZE + SHADOW_MAGIC_SIZE + 1],
+                       out->payload[SHADOW_CH_SIZE + SHADOW_MAGIC_SIZE + 2]);
   mesh.packetTables()->markSeen(out);   // ignore our own transmission if it loops back
   mesh.sendPacketRaw(out, priority, delay_millis);
   _sent++;
@@ -95,10 +124,17 @@ void ShadowNode::sendShadow(mesh::Mesh& mesh, mesh::Packet* out, uint8_t priorit
 bool ShadowNode::wrapEmbedded(mesh::Mesh& mesh, mesh::Packet* packet,
                               uint8_t priority, uint32_t delay_millis) {
   uint16_t inner_len = packet->payload_len;
-  if (inner_len > SHADOW_MAX_INNER_EMBEDDED) return false;
+  if (inner_len > SHADOW_MAX_INNER_EMBEDDED) {
+    MESH_DEBUG_PRINTLN("SHADOW TX FAIL reason=embedded-oversize len=%u max=%u",
+                       (unsigned)inner_len, (unsigned)SHADOW_MAX_INNER_EMBEDDED);
+    return false;
+  }
 
   mesh::Packet* out = mesh.obtainNewPacket();
-  if (out == NULL) return false;
+  if (out == NULL) {
+    MESH_DEBUG_PRINTLN("SHADOW TX FAIL reason=alloc-fail mode=EMB len=%u", (unsigned)inner_len);
+    return false;
+  }
 
   prepareOuter(out, packet, SHADOW_MODE_EMBEDDED);
   uint8_t tag[SHADOW_TAG_SIZE];
@@ -114,6 +150,7 @@ bool ShadowNode::wrapEmbedded(mesh::Mesh& mesh, mesh::Packet* packet,
   uint8_t digest[SHADOW_DIGEST_SIZE];
   if (!shadow::digestEmbedded(digest, out->header, shadow::pathModeOf(out),
                               out->payload, out->payload_len)) {
+    MESH_DEBUG_PRINTLN("SHADOW TX FAIL reason=digest mode=EMB len=%u", (unsigned)out->payload_len);
     mesh.releasePacket(out);
     return false;
   }
@@ -124,6 +161,9 @@ bool ShadowNode::wrapEmbedded(mesh::Mesh& mesh, mesh::Packet* packet,
   if (_scope_valid && packet->hasTransportCodes()) {
     out->transport_codes[0] = calcOuterCode(out);
   }
+  SHADOW_TRACE_PRINTLN("SHADOW TX embedded tag=%02X%02X%02X inner_type=%d inner_len=%u wire_len=%u",
+                       tag[0], tag[1], tag[2], packet->getPayloadType(),
+                       (unsigned)inner_len, (unsigned)out->payload_len);
   sendShadow(mesh, out, priority, delay_millis);
   return true;
 }
@@ -131,12 +171,20 @@ bool ShadowNode::wrapEmbedded(mesh::Mesh& mesh, mesh::Packet* packet,
 bool ShadowNode::wrapDetached(mesh::Mesh& mesh, mesh::Packet* packet,
                               uint8_t priority, uint32_t delay_millis) {
   uint16_t inner_len = packet->payload_len;
-  if (inner_len > SHADOW_MAX_INNER_MSG) return false;
+  if (inner_len > SHADOW_MAX_INNER_MSG) {
+    MESH_DEBUG_PRINTLN("SHADOW TX FAIL reason=message-oversize len=%u max=%u",
+                       (unsigned)inner_len, (unsigned)SHADOW_MAX_INNER_MSG);
+    return false;
+  }
 
   mesh::Packet* msg = mesh.obtainNewPacket();
-  if (msg == NULL) return false;
+  if (msg == NULL) {
+    MESH_DEBUG_PRINTLN("SHADOW TX FAIL reason=alloc-fail mode=MSG stage=msg");
+    return false;
+  }
   mesh::Packet* sig = mesh.obtainNewPacket();
   if (sig == NULL) {
+    MESH_DEBUG_PRINTLN("SHADOW TX FAIL reason=alloc-fail mode=MSG stage=sig");
     mesh.releasePacket(msg);
     return false;
   }
@@ -161,6 +209,7 @@ bool ShadowNode::wrapDetached(mesh::Mesh& mesh, mesh::Packet* packet,
   uint8_t msg_digest[SHADOW_DIGEST_SIZE];
   if (!shadow::digestMessage(msg_digest, msg->header, shadow::pathModeOf(msg),
                              msg->payload, msg->payload_len)) {
+    MESH_DEBUG_PRINTLN("SHADOW TX FAIL reason=digest mode=MSG len=%u", (unsigned)msg->payload_len);
     mesh.releasePacket(msg);
     mesh.releasePacket(sig);
     return false;
@@ -178,6 +227,7 @@ bool ShadowNode::wrapDetached(mesh::Mesh& mesh, mesh::Packet* packet,
   uint8_t sig_digest[SHADOW_DIGEST_SIZE];
   if (!shadow::digestSignature(sig_digest, sig->header, shadow::pathModeOf(sig),
                                sig->payload, sig->payload_len)) {
+    MESH_DEBUG_PRINTLN("SHADOW TX FAIL reason=digest mode=SIG len=%u", (unsigned)sig->payload_len);
     mesh.releasePacket(msg);
     mesh.releasePacket(sig);
     return false;
@@ -189,6 +239,11 @@ bool ShadowNode::wrapDetached(mesh::Mesh& mesh, mesh::Packet* packet,
     sig->transport_codes[0] = calcOuterCode(sig);
   }
 
+  SHADOW_TRACE_PRINTLN("SHADOW TX detached tag=%02X%02X%02X id=%02X%02X%02X%02X inner_type=%d inner_len=%u hash=%02X%02X%02X%02X",
+                       tag[0], tag[1], tag[2],
+                       sig_id[0], sig_id[1], sig_id[2], sig_id[3],
+                       packet->getPayloadType(), (unsigned)inner_len,
+                       msg_digest[0], msg_digest[1], msg_digest[2], msg_digest[3]);
   sendShadow(mesh, sig, priority, delay_millis);
   sendShadow(mesh, msg, priority, delay_millis + SHADOW_SIG_MSG_DELAY_MS);
   return true;
@@ -199,7 +254,11 @@ bool ShadowNode::wrapFragment(mesh::Mesh& mesh, mesh::Packet* packet,
   uint16_t inner_len = packet->payload_len;
   uint8_t count = (uint8_t)((inner_len + SHADOW_MAX_FRAG_PAYLOAD - 1) / SHADOW_MAX_FRAG_PAYLOAD);
   if (count == 0) count = 1;
-  if (count > SHADOW_MAX_FRAGMENTS) return false;
+  if (count > SHADOW_MAX_FRAGMENTS) {
+    MESH_DEBUG_PRINTLN("SHADOW TX FAIL reason=frag-count len=%u count=%u max=%u",
+                       (unsigned)inner_len, (unsigned)count, (unsigned)SHADOW_MAX_FRAGMENTS);
+    return false;
+  }
 
   uint8_t tag[SHADOW_TAG_SIZE];
   shadow::tagOf(_self.pub_key, tag);
@@ -212,7 +271,11 @@ bool ShadowNode::wrapFragment(mesh::Mesh& mesh, mesh::Packet* packet,
     if (chunk > SHADOW_MAX_FRAG_PAYLOAD) chunk = SHADOW_MAX_FRAG_PAYLOAD;
 
     mesh::Packet* out = mesh.obtainNewPacket();
-    if (out == NULL) return false;   // receiver will time out the partial set
+    if (out == NULL) {
+      MESH_DEBUG_PRINTLN("SHADOW TX FAIL reason=alloc-fail mode=FRAG sent=%u/%u",
+                         (unsigned)i, (unsigned)count);
+      return false;   // receiver will time out the partial set
+    }
 
     prepareOuter(out, packet, SHADOW_MODE_FRAGMENT);
     shadow::writeCommon(out->payload, tag, SHADOW_MODE_FRAGMENT);
@@ -228,6 +291,8 @@ bool ShadowNode::wrapFragment(mesh::Mesh& mesh, mesh::Packet* packet,
     uint8_t digest[SHADOW_DIGEST_SIZE];
     if (!shadow::digestFragment(digest, out->header, shadow::pathModeOf(out),
                                 out->payload, out->payload_len)) {
+      MESH_DEBUG_PRINTLN("SHADOW TX FAIL reason=digest mode=FRAG frag=%u/%u",
+                         (unsigned)i, (unsigned)count);
       mesh.releasePacket(out);
       return false;
     }
@@ -236,6 +301,11 @@ bool ShadowNode::wrapFragment(mesh::Mesh& mesh, mesh::Packet* packet,
     if (_scope_valid && packet->hasTransportCodes()) {
       out->transport_codes[0] = calcOuterCode(out);
     }
+    SHADOW_TRACE_PRINTLN("SHADOW TX fragment tag=%02X%02X%02X id=%02X%02X%02X%02X frag=%u/%u inner_type=%d chunk=%u wire_len=%u",
+                         tag[0], tag[1], tag[2],
+                         frag_id[0], frag_id[1], frag_id[2], frag_id[3],
+                         (unsigned)i, (unsigned)count, packet->getPayloadType(),
+                         (unsigned)chunk, (unsigned)out->payload_len);
     sendShadow(mesh, out, priority, delay_millis + (uint32_t)i * SHADOW_FRAG_GAP_MS);
   }
   return true;
@@ -243,7 +313,16 @@ bool ShadowNode::wrapFragment(mesh::Mesh& mesh, mesh::Packet* packet,
 
 bool ShadowNode::wrapAndSend(mesh::Mesh& mesh, mesh::Packet* packet,
                              uint8_t priority, uint32_t delay_millis) {
-  if (!_enabled || !shouldWrap(packet)) return false;
+  if (!_enabled) {
+    SHADOW_TRACE_PRINTLN("SHADOW TX SKIP reason=disabled type=%d len=%d",
+                         packet->getPayloadType(), packet->payload_len);
+    return false;
+  }
+  if (!shouldWrap(packet)) {
+    SHADOW_TRACE_PRINTLN("SHADOW TX SKIP reason=not-wrappable type=%d len=%d",
+                         packet->getPayloadType(), packet->payload_len);
+    return false;
+  }
 
   uint16_t inner_len = packet->payload_len;
   uint8_t mode;
@@ -268,6 +347,10 @@ bool ShadowNode::wrapAndSend(mesh::Mesh& mesh, mesh::Packet* packet,
     mode = SHADOW_MODE_FRAGMENT;
   }
 
+  SHADOW_TRACE_PRINTLN("SHADOW TX wrap type=%d inner_len=%u mode=%s",
+                       packet->getPayloadType(), (unsigned)inner_len,
+                       shadow::modeName(mode));
+
   bool ok;
   if (mode == SHADOW_MODE_EMBEDDED) {
     ok = wrapEmbedded(mesh, packet, priority, delay_millis);
@@ -277,8 +360,13 @@ bool ShadowNode::wrapAndSend(mesh::Mesh& mesh, mesh::Packet* packet,
     ok = wrapFragment(mesh, packet, priority, delay_millis);
   }
 
+  if (!ok) {
+    _dropped++;
+    MESH_DEBUG_PRINTLN("SHADOW TX DROP reason=wrap-fail type=%d len=%u mode=%s",
+                       packet->getPayloadType(), (unsigned)inner_len,
+                       shadow::modeName(mode));
+  }
   mesh.releasePacket(packet);   // original is never transmitted
-  if (!ok) _dropped++;
   return true;                  // consumed either way (fail-closed)
 }
 
@@ -291,10 +379,17 @@ void ShadowNode::saveEnvelope(const mesh::Packet* packet) {
   _saved_flags = packet->shadow_flags;
   _saved_auth_ok = packet->auth_ok;
   _saved_valid = true;
+  SHADOW_TRACE_PRINTLN("SHADOW RX saved envelope mode=%s len=%u",
+                       shadow::modeName(shadow::modeOf(_saved_flags)),
+                       (unsigned)_saved_payload_len);
 }
 
 void ShadowNode::prepareForward(mesh::Packet* packet) {
-  if (!_saved_valid) return;
+  if (!_saved_valid) {
+    MESH_DEBUG_PRINTLN("SHADOW: prepareForward without saved envelope type=%d len=%d",
+                       packet->getPayloadType(), packet->payload_len);
+    return;
+  }
 
   // Restore only the wire fields of the envelope. packet->path/path_len keep
   // the value Mesh::routeRecvPacket() produced for the retransmission; the
@@ -313,7 +408,12 @@ void ShadowNode::prepareForward(mesh::Packet* packet) {
 
 bool ShadowNode::unwrapLocal(mesh::Packet* packet, uint8_t inner_type,
                              const uint8_t* inner, uint16_t inner_len) {
-  if (inner_len > MAX_PACKET_PAYLOAD) return false;
+  if (inner_len > MAX_PACKET_PAYLOAD) {
+    MESH_DEBUG_PRINTLN("SHADOW RX DROP reason=unwrap-oversize type=%d len=%u max=%u",
+                       inner_type, (unsigned)inner_len, (unsigned)MAX_PACKET_PAYLOAD);
+    return false;
+  }
+  uint8_t mode = shadow::modeOf(packet->shadow_flags);
   memmove(packet->payload, inner, inner_len);
   packet->payload_len = inner_len;
   packet->header = (uint8_t)((inner_type << PH_TYPE_SHIFT) | (packet->header & PH_ROUTE_MASK));
@@ -322,6 +422,8 @@ bool ShadowNode::unwrapLocal(mesh::Packet* packet, uint8_t inner_type,
   packet->auth_ok = false;
   packet->shadow_flags = 0;
   _recv++;
+  MESH_DEBUG_PRINTLN("SHADOW RX UNWRAP OK mode=%s type=%d len=%u",
+                     shadow::modeName(mode), inner_type, (unsigned)inner_len);
   return false;
 }
 
@@ -344,8 +446,12 @@ int ShadowNode::allocFrag(unsigned long now_ms) {
   for (int i = 1; i < SHADOW_FRAG_MAX; i++) {
     if ((long)(_frags[i].last_ms - _frags[oldest].last_ms) < 0) oldest = i;
   }
-  (void)now_ms;
-  memset(&_frags[oldest], 0, sizeof(_frags[oldest]));
+  FragEntry& old = _frags[oldest];
+  MESH_DEBUG_PRINTLN("SHADOW RX EVICT frag tag=%02X%02X%02X id=%02X%02X%02X%02X age=%lu mask=%04X",
+                     old.tag[0], old.tag[1], old.tag[2],
+                     old.frag_id[0], old.frag_id[1], old.frag_id[2], old.frag_id[3],
+                     (unsigned long)(now_ms - old.last_ms), (unsigned)old.mask);
+  memset(&old, 0, sizeof(old));
   return oldest;
 }
 
@@ -353,21 +459,29 @@ bool ShadowNode::processFragment(mesh::Mesh& mesh, mesh::Packet* packet, const u
                                  uint8_t inner_type, const uint8_t* frag_payload, uint16_t frag_len,
                                  unsigned long now_ms) {
   (void)mesh;
-  const uint8_t* frag_id = &packet->payload[SHADOW_COMMON_SIZE];
+  uint8_t frag_id_buf[SHADOW_SIG_ID_SIZE];
+  memcpy(frag_id_buf, &packet->payload[SHADOW_COMMON_SIZE], SHADOW_SIG_ID_SIZE);
+  const uint8_t* frag_id = frag_id_buf;
   uint8_t index = packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE];
   uint8_t count = packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 1];
 
   if (count == 0 || count > SHADOW_MAX_FRAGMENTS || index >= count) {
-    _dropped++;
-    return true;
+    SHADOW_TRACE_PRINTLN("SHADOW: frag bad index id=%02X%02X%02X%02X index=%u count=%u",
+                         frag_id[0], frag_id[1], frag_id[2], frag_id[3],
+                         (unsigned)index, (unsigned)count);
+    return drop("frag-bad-index", packet, tag);
   }
   if (frag_len > SHADOW_MAX_FRAG_PAYLOAD) {
-    _dropped++;
-    return true;
+    SHADOW_TRACE_PRINTLN("SHADOW: frag oversize id=%02X%02X%02X%02X len=%u max=%u",
+                         frag_id[0], frag_id[1], frag_id[2], frag_id[3],
+                         (unsigned)frag_len, (unsigned)SHADOW_MAX_FRAG_PAYLOAD);
+    return drop("frag-oversize", packet, tag);
   }
   if (index < count - 1 && frag_len != SHADOW_MAX_FRAG_PAYLOAD) {
-    _dropped++;
-    return true;
+    SHADOW_TRACE_PRINTLN("SHADOW: frag bad len id=%02X%02X%02X%02X index=%u/%u len=%u",
+                         frag_id[0], frag_id[1], frag_id[2], frag_id[3],
+                         (unsigned)index, (unsigned)count, (unsigned)frag_len);
+    return drop("frag-bad-len", packet, tag);
   }
 
   int slot = findFrag(tag, frag_id);
@@ -382,29 +496,41 @@ bool ShadowNode::processFragment(mesh::Mesh& mesh, mesh::Packet* packet, const u
     e.count = count;
     e.last_ms = now_ms;
     e.expiry_ms = now_ms + _frag_ttl_ms;
+    MESH_DEBUG_PRINTLN("SHADOW RX FRAG start tag=%02X%02X%02X id=%02X%02X%02X%02X type=%d count=%u slot=%d ttl=%lu",
+                       tag[0], tag[1], tag[2],
+                       frag_id[0], frag_id[1], frag_id[2], frag_id[3],
+                       inner_type, (unsigned)count, slot, (unsigned long)_frag_ttl_ms);
   }
 
   FragEntry& e = _frags[slot];
   if (e.inner_type != inner_type || e.count != count) {
-    _dropped++;
+    SHADOW_TRACE_PRINTLN("SHADOW: frag mismatch id=%02X%02X%02X%02X type=%d/%d count=%u/%u",
+                         frag_id[0], frag_id[1], frag_id[2], frag_id[3],
+                         inner_type, e.inner_type, (unsigned)count, (unsigned)e.count);
     e.used = false;
-    return true;
+    return drop("frag-mismatch", packet, tag);
   }
   uint16_t bit = (uint16_t)1 << index;
   if (e.mask & bit) {
+    SHADOW_TRACE_PRINTLN("SHADOW: frag duplicate id=%02X%02X%02X%02X index=%u/%u mask=%04X",
+                         frag_id[0], frag_id[1], frag_id[2], frag_id[3],
+                         (unsigned)index, (unsigned)count, (unsigned)e.mask);
     return true;   // duplicate fragment
   }
 
   uint16_t offset = (uint16_t)index * SHADOW_MAX_FRAG_PAYLOAD;
   if (offset + frag_len > MAX_PACKET_PAYLOAD) {
-    _dropped++;
+    SHADOW_TRACE_PRINTLN("SHADOW: frag overflow id=%02X%02X%02X%02X index=%u offset=%u len=%u",
+                         frag_id[0], frag_id[1], frag_id[2], frag_id[3],
+                         (unsigned)index, (unsigned)offset, (unsigned)frag_len);
     e.used = false;
-    return true;
+    return drop("frag-overflow", packet, tag);
   }
   memcpy(&e.payload[offset], frag_payload, frag_len);
   e.mask |= bit;
   if (index == count - 1) e.last_len = (uint8_t)frag_len;
 
+  unsigned long prev_last = e.last_ms;
   e.last_ms = now_ms;
   e.expiry_ms = now_ms + _frag_ttl_ms;
 
@@ -412,9 +538,10 @@ bool ShadowNode::processFragment(mesh::Mesh& mesh, mesh::Packet* packet, const u
   if (e.mask == complete_mask) {
     uint16_t total = (uint16_t)(count - 1) * SHADOW_MAX_FRAG_PAYLOAD + e.last_len;
     if (total > MAX_PACKET_PAYLOAD) {
-      _dropped++;
+      SHADOW_TRACE_PRINTLN("SHADOW: frag total overflow id=%02X%02X%02X%02X total=%u",
+                           frag_id[0], frag_id[1], frag_id[2], frag_id[3], (unsigned)total);
       e.used = false;
-      return true;
+      return drop("frag-total", packet, tag);
     }
     memcpy(packet->payload, e.payload, total);
     packet->payload_len = total;
@@ -426,6 +553,10 @@ bool ShadowNode::processFragment(mesh::Mesh& mesh, mesh::Packet* packet, const u
     e.used = false;
     _frags_recv++;
     _recv++;
+    MESH_DEBUG_PRINTLN("SHADOW RX FRAG complete tag=%02X%02X%02X id=%02X%02X%02X%02X type=%d total=%u gap=%lu",
+                       tag[0], tag[1], tag[2],
+                       frag_id[0], frag_id[1], frag_id[2], frag_id[3],
+                       inner_type, (unsigned)total, (unsigned long)(now_ms - prev_last));
     return false;
   }
   return true;
@@ -441,24 +572,37 @@ bool ShadowNode::unwrapAndProcess(mesh::Mesh& mesh, mesh::Packet* packet) {
   if (!shadow::parseHeader(packet, tag, &flags)) {
     // Correct marker but an unsupported future version. A repeater must
     // forward it unchanged; an endpoint has nothing to do with it.
-    if (!_unwrap_all) return false;
-    _dropped++;
-    return true;
+    if (!_unwrap_all) {
+      SHADOW_TRACE_PRINTLN("SHADOW RX FORWARD reason=bad-version type=%d route=%c len=%d",
+                           packet->getPayloadType(), packet->isRouteDirect() ? 'D' : 'F',
+                           packet->payload_len);
+      return false;
+    }
+    return drop("bad-version", packet, tag);
   }
 
   uint8_t mode = shadow::modeOf(flags);
   unsigned long now_ms = mesh.getMillis();
+  SHADOW_TRACE_PRINTLN("SHADOW RX shadow mode=%s tag=%02X%02X%02X type=%d route=%c len=%d",
+                       shadow::modeName(mode), tag[0], tag[1], tag[2],
+                       packet->getPayloadType(), packet->isRouteDirect() ? 'D' : 'F',
+                       packet->payload_len);
 
   if (mode == SHADOW_MODE_SIGNATURE) {
     // Nodes do not need signature packets; leaving them to normal Mesh
     // processing lets a repeater-capable node forward them unchanged.
+    SHADOW_TRACE_PRINTLN("SHADOW RX FORWARD reason=signature-packet tag=%02X%02X%02X",
+                         tag[0], tag[1], tag[2]);
     return false;
   }
   if (mode == SHADOW_MODE_FRAGMENT) {
-    if (!_unwrap_all) return false;   // repeater forwards fragments unchanged
+    if (!_unwrap_all) {   // repeater forwards fragments unchanged
+      SHADOW_TRACE_PRINTLN("SHADOW RX FORWARD reason=repeater-fragment tag=%02X%02X%02X",
+                           tag[0], tag[1], tag[2]);
+      return false;
+    }
     if (packet->payload_len < SHADOW_FRAG_OVERHEAD) {
-      _dropped++;
-      return true;
+      return drop("frag-short", packet, tag);
     }
     uint8_t inner_type = packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 2];
     uint16_t frag_len = packet->payload_len - SHADOW_FRAG_OVERHEAD;
@@ -477,8 +621,12 @@ bool ShadowNode::unwrapAndProcess(mesh::Mesh& mesh, mesh::Packet* packet) {
           *local = *packet;
           local->local_only = true;
           mesh.queueInboundPacket(local, 0);
+          SHADOW_TRACE_PRINTLN("SHADOW RX local deliver tag=%02X%02X%02X type=%d len=%d",
+                               tag[0], tag[1], tag[2], local->getPayloadType(), local->payload_len);
         } else {
           _dropped++;
+          MESH_DEBUG_PRINTLN("SHADOW RX DROP reason=local-alloc-fail tag=%02X%02X%02X",
+                             tag[0], tag[1], tag[2]);
         }
       }
       prepareForward(packet);
@@ -494,23 +642,20 @@ bool ShadowNode::unwrapAndProcess(mesh::Mesh& mesh, mesh::Packet* packet) {
 
   if (mode == SHADOW_MODE_EMBEDDED) {
     if (packet->payload_len < SHADOW_EMBEDDED_OVERHEAD) {
-      _dropped++;
-      return true;
+      return drop("embedded-short", packet, tag);
     }
     inner_type = packet->payload[SHADOW_COMMON_SIZE];
     inner = &packet->payload[SHADOW_COMMON_SIZE + 1];
     inner_len = packet->payload_len - SHADOW_EMBEDDED_OVERHEAD;
   } else if (mode == SHADOW_MODE_MESSAGE) {
     if (packet->payload_len < SHADOW_MSG_OVERHEAD) {
-      _dropped++;
-      return true;
+      return drop("msg-short", packet, tag);
     }
     inner_type = packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE];
     inner = &packet->payload[SHADOW_MSG_OVERHEAD];
     inner_len = packet->payload_len - SHADOW_MSG_OVERHEAD;
   } else {
-    _dropped++;
-    return true;
+    return drop("bad-mode", packet, tag);
   }
 
   if (inner_type == PAYLOAD_TYPE_ADVERT) {
@@ -518,12 +663,18 @@ bool ShadowNode::unwrapAndProcess(mesh::Mesh& mesh, mesh::Packet* packet) {
     // adverts and direct transit adverts keep the envelope for forwarding.
     if (!_unwrap_all
         && !(packet->isRouteDirect() && packet->getPathHashCount() == 0)) {
+      SHADOW_TRACE_PRINTLN("SHADOW RX FORWARD reason=advert-transit tag=%02X%02X%02X route=%c path=%d",
+                           tag[0], tag[1], tag[2],
+                           packet->isRouteDirect() ? 'D' : 'F', (int)packet->getPathHashCount());
       return false;
     }
     if (_unwrap_all && _forward_envelopes && packet->isRouteFlood()
         && inner_len <= MAX_PACKET_PAYLOAD) {
       saveEnvelope(packet);
     }
+    MESH_DEBUG_PRINTLN("SHADOW RX UNWRAP advert tag=%02X%02X%02X inner_len=%u route=%c",
+                       tag[0], tag[1], tag[2], (unsigned)inner_len,
+                       packet->isRouteDirect() ? 'D' : 'F');
     return unwrapLocal(packet, inner_type, inner, inner_len);
   }
 
@@ -533,11 +684,21 @@ bool ShadowNode::unwrapAndProcess(mesh::Mesh& mesh, mesh::Packet* packet) {
     // Direct payloads carry a destination hash as their first inner byte.
     // Never unwrap someone else's transit packet: leave the envelope intact
     // so a repeater-capable node can forward it.
-    if (inner_len < 1 || !_self.isHashMatch(inner)) return false;
-    if (packet->isRouteDirect() && packet->getPathHashCount() > 0) return false;
+    if (inner_len < 1 || !_self.isHashMatch(inner)) {
+      SHADOW_TRACE_PRINTLN("SHADOW RX FORWARD reason=not-for-us tag=%02X%02X%02X type=%d len=%u",
+                           tag[0], tag[1], tag[2], inner_type, (unsigned)inner_len);
+      return false;
+    }
+    if (packet->isRouteDirect() && packet->getPathHashCount() > 0) {
+      SHADOW_TRACE_PRINTLN("SHADOW RX FORWARD reason=direct-transit tag=%02X%02X%02X type=%d path=%d",
+                           tag[0], tag[1], tag[2], inner_type, (int)packet->getPathHashCount());
+      return false;
+    }
   } else if (!_unwrap_all) {
     // A repeater only unwraps direct traffic addressed to itself; group
     // traffic stays wrapped and is forwarded.
+    SHADOW_TRACE_PRINTLN("SHADOW RX FORWARD reason=group-transit tag=%02X%02X%02X type=%d",
+                         tag[0], tag[1], tag[2], inner_type);
     return false;
   }
 
@@ -545,6 +706,9 @@ bool ShadowNode::unwrapAndProcess(mesh::Mesh& mesh, mesh::Packet* packet) {
       && inner_len <= MAX_PACKET_PAYLOAD) {
     saveEnvelope(packet);
   }
+  MESH_DEBUG_PRINTLN("SHADOW RX UNWRAP type=%d tag=%02X%02X%02X inner_len=%u mode=%s",
+                     inner_type, tag[0], tag[1], tag[2], (unsigned)inner_len,
+                     shadow::modeName(mode));
   return unwrapLocal(packet, inner_type, inner, inner_len);
 }
 
@@ -552,6 +716,10 @@ void ShadowNode::poll(unsigned long now_ms) {
   for (int i = 0; i < SHADOW_FRAG_MAX; i++) {
     FragEntry& e = _frags[i];
     if (e.used && (long)(now_ms - e.expiry_ms) >= 0) {
+      MESH_DEBUG_PRINTLN("SHADOW RX DROP reason=frag-expired tag=%02X%02X%02X id=%02X%02X%02X%02X mask=%04X age=%lu",
+                         e.tag[0], e.tag[1], e.tag[2],
+                         e.frag_id[0], e.frag_id[1], e.frag_id[2], e.frag_id[3],
+                         (unsigned)e.mask, (unsigned long)(now_ms - e.last_ms));
       e.used = false;
       _dropped++;
     }

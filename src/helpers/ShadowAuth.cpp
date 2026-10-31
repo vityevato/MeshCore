@@ -139,6 +139,34 @@ ShadowAuth::ShadowAuth()
   memset(_advert_rate, 0, sizeof(_advert_rate));
 }
 
+bool ShadowAuth::drop(const char* reason, const mesh::Packet* pkt, const uint8_t* tag) {
+  _dropped++;
+  char tag_buf[2 * SHADOW_TAG_SIZE + 1];
+  if (tag != NULL) {
+    mesh::Utils::toHex(tag_buf, tag, SHADOW_TAG_SIZE);
+  } else {
+    snprintf(tag_buf, sizeof(tag_buf), "---");
+  }
+  MESH_DEBUG_PRINTLN("SHADOW RX DROP reason=%s type=%d route=%c len=%d tag=%s",
+                     reason, pkt->getPayloadType(), pkt->isRouteDirect() ? 'D' : 'F',
+                     pkt->payload_len, tag_buf);
+  return true;
+}
+
+bool ShadowAuth::wouldDrop(const char* reason, const mesh::Packet* pkt, const uint8_t* tag) {
+  _would_drop++;
+  char tag_buf[2 * SHADOW_TAG_SIZE + 1];
+  if (tag != NULL) {
+    mesh::Utils::toHex(tag_buf, tag, SHADOW_TAG_SIZE);
+  } else {
+    snprintf(tag_buf, sizeof(tag_buf), "---");
+  }
+  MESH_DEBUG_PRINTLN("SHADOW RX WOULD-DROP reason=%s type=%d route=%c len=%d tag=%s",
+                     reason, pkt->getPayloadType(), pkt->isRouteDirect() ? 'D' : 'F',
+                     pkt->payload_len, tag_buf);
+  return false;
+}
+
 void ShadowAuth::begin(ShadowFs* fs, uint32_t now_epoch) {
 #if SHADOW_AUTH_HAS_FS
   _fs = fs;
@@ -171,15 +199,28 @@ void ShadowAuth::begin(ShadowFs* fs, uint32_t now_epoch) {
   prefs.enforce = 0;
   updateTtls();
 #endif
+  MESH_DEBUG_PRINTLN("SHADOW: begin enabled=%d enforce=%d anon=%d advert=%d auto_add=%d pending=%d allow=%d/%d ttl=%lu/%lu/%lu",
+                     (int)prefs.enabled, (int)prefs.enforce, (int)prefs.allow_anon,
+                     (int)prefs.allow_advert, (int)prefs.auto_add, (int)prefs.pending_max,
+                     getNumAllowed(), SHADOW_MAX_ALLOW,
+                     (unsigned long)_hold_ttl_ms, (unsigned long)_sig_ttl_ms,
+                     (unsigned long)_frag_ttl_ms);
 }
 
 bool ShadowAuth::loadPrefs(ShadowFs* fs) {
 #if SHADOW_AUTH_HAS_FS
-  if (fs == NULL || !fs->exists("/shadow_prefs")) return false;
+  if (fs == NULL || !fs->exists("/shadow_prefs")) {
+    MESH_DEBUG_PRINTLN("SHADOW: /shadow_prefs not found, using defaults");
+    return false;
+  }
   File f = shadowOpenRead(fs, "/shadow_prefs");
-  if (!f) return false;
+  if (!f) {
+    MESH_DEBUG_PRINTLN("SHADOW: /shadow_prefs open failed");
+    return false;
+  }
   bool ok = prefs.loadSerial(f);
   f.close();
+  MESH_DEBUG_PRINTLN("SHADOW: /shadow_prefs %s", ok ? "loaded" : "parse failed");
   return ok;
 #else
   (void)fs;
@@ -194,10 +235,18 @@ bool ShadowAuth::savePrefs(ShadowFs* fs) {
   prefs.max_sig_wait_ms = _ttl.maxSigWait();
   prefs.max_frag_gap_ms = _ttl.maxFragGap();
   File f = shadowOpenWrite(fs, "/shadow_prefs");
-  if (!f) return false;
+  if (!f) {
+    MESH_DEBUG_PRINTLN("SHADOW: /shadow_prefs write open failed");
+    return false;
+  }
   bool ok = prefs.saveSerial(f);
   f.close();
-  if (ok) _prefs_dirty = false;
+  if (ok) {
+    _prefs_dirty = false;
+    SHADOW_TRACE_PRINTLN("SHADOW: /shadow_prefs saved");
+  } else {
+    MESH_DEBUG_PRINTLN("SHADOW: /shadow_prefs save failed");
+  }
   return ok;
 #else
   (void)fs;
@@ -209,9 +258,15 @@ bool ShadowAuth::savePrefs(ShadowFs* fs) {
 bool ShadowAuth::loadAllowList(ShadowFs* fs) {
 #if SHADOW_AUTH_HAS_FS
   memset(_allow, 0, sizeof(_allow));
-  if (fs == NULL || !fs->exists("/shadow_acl")) return false;
+  if (fs == NULL || !fs->exists("/shadow_acl")) {
+    MESH_DEBUG_PRINTLN("SHADOW: /shadow_acl not found");
+    return false;
+  }
   File f = shadowOpenRead(fs, "/shadow_acl");
-  if (!f) return false;
+  if (!f) {
+    MESH_DEBUG_PRINTLN("SHADOW: /shadow_acl open failed");
+    return false;
+  }
 
   int n = 0;
   while (n < SHADOW_MAX_ALLOW) {
@@ -222,6 +277,7 @@ bool ShadowAuth::loadAllowList(ShadowFs* fs) {
     if (e.flags & 1) _allow[n++] = e;
   }
   f.close();
+  MESH_DEBUG_PRINTLN("SHADOW: /shadow_acl loaded %d keys", n);
   return n > 0;
 #else
   (void)fs;
@@ -233,17 +289,26 @@ bool ShadowAuth::saveAllowList(ShadowFs* fs) {
 #if SHADOW_AUTH_HAS_FS
   if (fs == NULL) return false;
   File f = shadowOpenWrite(fs, "/shadow_acl");
-  if (!f) return false;
+  if (!f) {
+    MESH_DEBUG_PRINTLN("SHADOW: /shadow_acl write open failed");
+    return false;
+  }
+  bool ok = true;
   for (int i = 0; i < SHADOW_MAX_ALLOW; i++) {
     ShadowAllowEntry& e = _allow[i];
     if (!(e.flags & 1)) continue;
-    if (f.write(e.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) break;
-    if (f.write(&e.flags, 1) != 1) break;
-    if (f.write((uint8_t*)&e.last_seen, 4) != 4) break;
+    if (f.write(e.pub_key, PUB_KEY_SIZE) != PUB_KEY_SIZE) { ok = false; break; }
+    if (f.write(&e.flags, 1) != 1) { ok = false; break; }
+    if (f.write((uint8_t*)&e.last_seen, 4) != 4) { ok = false; break; }
   }
   f.close();
-  _allow_dirty = false;
-  return true;
+  if (!ok) {
+    MESH_DEBUG_PRINTLN("SHADOW: /shadow_acl save failed");
+  } else {
+    _allow_dirty = false;
+    SHADOW_TRACE_PRINTLN("SHADOW: /shadow_acl saved");
+  }
+  return ok;
 #else
   (void)fs;
   _allow_dirty = false;
@@ -252,6 +317,10 @@ bool ShadowAuth::saveAllowList(ShadowFs* fs) {
 }
 
 void ShadowAuth::updateTtls() {
+  unsigned long old_hold = _hold_ttl_ms;
+  unsigned long old_sig = _sig_ttl_ms;
+  unsigned long old_frag = _frag_ttl_ms;
+
   uint32_t hold = prefs.hold_default_ms;
   uint32_t by_msg = _ttl.maxMsgWait() * 2UL + prefs.margin_ms;
   if (by_msg > hold) hold = by_msg;
@@ -267,9 +336,18 @@ void ShadowAuth::updateTtls() {
   uint32_t by_frag = _ttl.maxFragGap() * 2UL + prefs.margin_ms;
   if (by_frag > frag) frag = by_frag;
   _frag_ttl_ms = clampU32(frag, SHADOW_FRAG_TTL_MIN_MS, SHADOW_FRAG_TTL_MAX_MS);
+
+  if (old_hold != _hold_ttl_ms || old_sig != _sig_ttl_ms || old_frag != _frag_ttl_ms) {
+    MESH_DEBUG_PRINTLN("SHADOW: ttl hold=%lu sig=%lu frag=%lu (max msg/sig/frag=%lu/%lu/%lu)",
+                       (unsigned long)_hold_ttl_ms, (unsigned long)_sig_ttl_ms,
+                       (unsigned long)_frag_ttl_ms,
+                       (unsigned long)_ttl.maxMsgWait(), (unsigned long)_ttl.maxSigWait(),
+                       (unsigned long)_ttl.maxFragGap());
+  }
 }
 
-bool ShadowAuth::rateAllow(TagRate* table, const uint8_t* tag, unsigned long now_ms, uint16_t max_per_min) {
+bool ShadowAuth::rateAllow(TagRate* table, const char* table_name, const uint8_t* tag,
+                           unsigned long now_ms, uint16_t max_per_min) {
   int free_idx = -1;
   unsigned long oldest = now_ms;
   for (int i = 0; i < 16; i++) {
@@ -280,7 +358,12 @@ bool ShadowAuth::rateAllow(TagRate* table, const uint8_t* tag, unsigned long now
         r.count = 1;
         return true;
       }
-      if (r.count >= max_per_min) return false;
+      if (r.count >= max_per_min) {
+        SHADOW_TRACE_PRINTLN("SHADOW: rate limit table=%s tag=%02X%02X%02X count=%u/%u",
+                             table_name, tag[0], tag[1], tag[2], (unsigned)r.count,
+                             (unsigned)max_per_min);
+        return false;
+      }
       r.count++;
       return true;
     }
@@ -293,7 +376,10 @@ bool ShadowAuth::rateAllow(TagRate* table, const uint8_t* tag, unsigned long now
       free_idx = i;
     }
   }
-  if (free_idx < 0) return false;
+  if (free_idx < 0) {
+    MESH_DEBUG_PRINTLN("SHADOW: rate table full table=%s", table_name);
+    return false;
+  }
   TagRate& r = table[free_idx];
   memcpy(r.tag, tag, SHADOW_TAG_SIZE);
   r.window_ms = now_ms;
@@ -315,6 +401,9 @@ ShadowSigEntry* ShadowAuth::findSig(const uint8_t* tag, const uint8_t* sig_id, u
     ShadowSigEntry& e = _sig[i];
     if (!e.used) continue;
     if ((long)(now_ms - e.expiry_ms) >= 0) {
+      SHADOW_TRACE_PRINTLN("SHADOW: sig-cache expired tag=%02X%02X%02X id=%02X%02X%02X%02X",
+                           e.tag[0], e.tag[1], e.tag[2],
+                           e.sig_id[0], e.sig_id[1], e.sig_id[2], e.sig_id[3]);
       e.used = false;
       continue;
     }
@@ -343,23 +432,40 @@ void ShadowAuth::insertSig(const uint8_t* tag, const uint8_t* sig_id,
                            const uint8_t* msg_hash, unsigned long now_ms) {
   int slot = oldestSigSlot(_sig, SHADOW_SIG_CACHE_SIZE);
   ShadowSigEntry& e = _sig[slot];
+  if (e.used) {
+    MESH_DEBUG_PRINTLN("SHADOW: sig-cache EVICT slot=%d old_tag=%02X%02X%02X old_id=%02X%02X%02X%02X",
+                       slot, e.tag[0], e.tag[1], e.tag[2],
+                       e.sig_id[0], e.sig_id[1], e.sig_id[2], e.sig_id[3]);
+  }
   e.used = true;
   memcpy(e.tag, tag, SHADOW_TAG_SIZE);
   memcpy(e.sig_id, sig_id, SHADOW_SIG_ID_SIZE);
   memcpy(e.msg_hash, msg_hash, SHADOW_MSG_HASH_SIZE);
   e.created_ms = now_ms;
   e.expiry_ms = now_ms + _sig_ttl_ms;
+  SHADOW_TRACE_PRINTLN("SHADOW: sig-cache insert slot=%d tag=%02X%02X%02X id=%02X%02X%02X%02X hash=%02X%02X%02X%02X",
+                       slot, tag[0], tag[1], tag[2],
+                       sig_id[0], sig_id[1], sig_id[2], sig_id[3],
+                       msg_hash[0], msg_hash[1], msg_hash[2], msg_hash[3]);
 }
 
 bool ShadowAuth::verifyWithCandidates(const uint8_t* tag, const uint8_t* signature,
                                       const uint8_t digest[SHADOW_DIGEST_SIZE]) {
+  int candidates = 0;
   for (int i = 0; i < SHADOW_MAX_ALLOW; i++) {
     if (!(_allow[i].flags & 1)) continue;
     if (memcmp(_allow[i].pub_key, tag, SHADOW_TAG_SIZE) != 0) continue;
+    candidates++;
     mesh::Identity id(_allow[i].pub_key);
     if (id.verify(signature, digest, SHADOW_DIGEST_SIZE)) {
+      SHADOW_TRACE_PRINTLN("SHADOW: verify ok tag=%02X%02X%02X candidate=%d/%d",
+                           tag[0], tag[1], tag[2], candidates, getNumAllowed());
       return true;
     }
+  }
+  if (candidates > 1) {
+    SHADOW_TRACE_PRINTLN("SHADOW: verify failed tag=%02X%02X%02X candidates=%d",
+                         tag[0], tag[1], tag[2], candidates);
   }
   return false;
 }
@@ -369,16 +475,27 @@ void ShadowAuth::releasePending(mesh::Mesh& mesh, int idx) {
   if (!e.used) return;
 
   mesh::Packet* p = mesh.obtainNewPacket();
-  if (p != NULL) {
-    if (p->readFrom(e.data, (uint8_t)e.len)) {
-      p->shadow = true;
-      p->shadow_wrapped = true;
-      p->shadow_flags = shadow::makeFlags(SHADOW_MODE_MESSAGE);
-      p->auth_ok = true;
-      mesh.queueInboundPacket(p, 0);
-    } else {
-      mesh.releasePacket(p);
-    }
+  if (p == NULL) {
+    _dropped++;
+    MESH_DEBUG_PRINTLN("SHADOW: pending release DROP reason=alloc-fail tag=%02X%02X%02X id=%02X%02X%02X%02X",
+                       e.tag[0], e.tag[1], e.tag[2],
+                       e.sig_id[0], e.sig_id[1], e.sig_id[2], e.sig_id[3]);
+  } else if (p->readFrom(e.data, (uint8_t)e.len)) {
+    p->shadow = true;
+    p->shadow_wrapped = true;
+    p->shadow_flags = shadow::makeFlags(SHADOW_MODE_MESSAGE);
+    p->auth_ok = true;
+    mesh.queueInboundPacket(p, 0);
+    MESH_DEBUG_PRINTLN("SHADOW: pending release tag=%02X%02X%02X id=%02X%02X%02X%02X len=%u",
+                       e.tag[0], e.tag[1], e.tag[2],
+                       e.sig_id[0], e.sig_id[1], e.sig_id[2], e.sig_id[3],
+                       (unsigned)e.len);
+  } else {
+    mesh.releasePacket(p);
+    _dropped++;
+    MESH_DEBUG_PRINTLN("SHADOW: pending release DROP reason=read-fail tag=%02X%02X%02X id=%02X%02X%02X%02X",
+                       e.tag[0], e.tag[1], e.tag[2],
+                       e.sig_id[0], e.sig_id[1], e.sig_id[2], e.sig_id[3]);
   }
   e.used = false;
 }
@@ -428,16 +545,12 @@ bool ShadowAuth::filterShadow(mesh::Mesh& mesh, mesh::Packet* pkt, const uint8_t
                               uint8_t flags, unsigned long now_ms) {
   uint8_t mode = shadow::modeOf(flags);
   if (mode > SHADOW_MODE_FRAGMENT) {
-    if (enforce()) { _dropped++; return true; }
-    _would_drop++;
-    return false;
+    return enforce() ? drop("bad-mode", pkt, tag) : wouldDrop("bad-mode", pkt, tag);
   }
 
   uint8_t digest[SHADOW_DIGEST_SIZE];
   if (!shadow::digestForMode(digest, mode, pkt)) {
-    if (enforce()) { _dropped++; return true; }
-    _would_drop++;
-    return false;
+    return enforce() ? drop("bad-digest", pkt, tag) : wouldDrop("bad-digest", pkt, tag);
   }
 
   uint8_t hash16[SHADOW_MSG_HASH_SIZE];
@@ -446,6 +559,9 @@ bool ShadowAuth::filterShadow(mesh::Mesh& mesh, mesh::Packet* pkt, const uint8_t
   // Dedup-before-verify. Only successfully verified packets enter this cache.
   if (_verified.contains(hash16)) {
     _dup_fast++;
+    SHADOW_TRACE_PRINTLN("SHADOW RX ACCEPT dup-cache mode=%s tag=%02X%02X%02X hash=%02X%02X%02X%02X",
+                         shadow::modeName(mode), tag[0], tag[1], tag[2],
+                         hash16[0], hash16[1], hash16[2], hash16[3]);
     if (mode == SHADOW_MODE_SIGNATURE) {
       // Refresh the signature association in case its cache entry expired.
       uint8_t sig_id[SHADOW_SIG_ID_SIZE];
@@ -466,9 +582,8 @@ bool ShadowAuth::filterShadow(mesh::Mesh& mesh, mesh::Packet* pkt, const uint8_t
           && (inner_len < PUB_KEY_SIZE + 4 + SIGNATURE_SIZE
               || memcmp(tag, inner, SHADOW_TAG_SIZE) != 0
               || !contains(inner))) {
-        if (enforce()) { _dropped++; return true; }
-        _would_drop++;
-        return false;
+        return enforce() ? drop("advert-policy-cached", pkt, tag)
+                         : wouldDrop("advert-policy-cached", pkt, tag);
       }
     }
     pkt->auth_ok = true;
@@ -489,29 +604,27 @@ bool ShadowAuth::filterShadow(mesh::Mesh& mesh, mesh::Packet* pkt, const uint8_t
       if (inner_len < PUB_KEY_SIZE + 4 + SIGNATURE_SIZE
           || memcmp(tag, inner, SHADOW_TAG_SIZE) != 0) {
         _bad_sig++;
-        if (enforce()) { _dropped++; return true; }
-        _would_drop++;
-        return false;
+        return enforce() ? drop("advert-tag-mismatch", pkt, tag)
+                         : wouldDrop("advert-tag-mismatch", pkt, tag);
       }
       // Strict mode: reject unknown advert keys before doing Ed25519 work.
       if (!prefs.allow_advert && !contains(inner)) {
-        if (enforce()) { _dropped++; return true; }
-        _would_drop++;
-        return false;
+        return enforce() ? drop("advert-unknown-key", pkt, tag)
+                         : wouldDrop("advert-unknown-key", pkt, tag);
       }
-      if (!rateAllow(_advert_rate, tag, now_ms, 8)) {
-        if (enforce()) { _dropped++; return true; }
-        _would_drop++;
-        return false;
+      if (!rateAllow(_advert_rate, "advert", tag, now_ms, 8)) {
+        return enforce() ? drop("advert-rate", pkt, tag)
+                         : wouldDrop("advert-rate", pkt, tag);
       }
       if (!verifyAdvertInner(inner, inner_len)) {
         _bad_sig++;
-        if (enforce()) { _dropped++; return true; }
-        _would_drop++;
-        return false;
+        return enforce() ? drop("advert-badsig", pkt, tag)
+                         : wouldDrop("advert-badsig", pkt, tag);
       }
       _verified.insert(hash16);
       pkt->auth_ok = true;
+      MESH_DEBUG_PRINTLN("SHADOW RX ACCEPT advert tag=%02X%02X%02X inner_len=%u allow_advert=%d",
+                         tag[0], tag[1], tag[2], (unsigned)inner_len, (int)prefs.allow_advert);
       return false;
     }
   }
@@ -519,14 +632,10 @@ bool ShadowAuth::filterShadow(mesh::Mesh& mesh, mesh::Packet* pkt, const uint8_t
   // Unknown tags are dropped before the expensive Ed25519 operation. A known
   // tag is rate-limited so one compromised node cannot monopolise the CPU.
   if (!hasAllowedTag(tag)) {
-    if (enforce()) { _dropped++; return true; }
-    _would_drop++;
-    return false;
+    return enforce() ? drop("unknown-tag", pkt, tag) : wouldDrop("unknown-tag", pkt, tag);
   }
-  if (!rateAllow(_rate, tag, now_ms, 300)) {
-    if (enforce()) { _dropped++; return true; }
-    _would_drop++;
-    return false;
+  if (!rateAllow(_rate, "transit", tag, now_ms, 300)) {
+    return enforce() ? drop("transit-rate", pkt, tag) : wouldDrop("transit-rate", pkt, tag);
   }
 
   if (mode == SHADOW_MODE_MESSAGE) {
@@ -540,32 +649,34 @@ bool ShadowAuth::filterShadow(mesh::Mesh& mesh, mesh::Packet* pkt, const uint8_t
         pkt->auth_ok = true;
         uint32_t wait = (uint32_t)(now_ms - sig->created_ms);
         if (wait > 0) _ttl.addSigWait(wait);
+        MESH_DEBUG_PRINTLN("SHADOW RX ACCEPT message tag=%02X%02X%02X id=%02X%02X%02X%02X wait=%lu",
+                           tag[0], tag[1], tag[2],
+                           sig_id[0], sig_id[1], sig_id[2], sig_id[3], (unsigned long)wait);
         return false;
       }
       _bad_sig++;
-      if (enforce()) return true;
-      _would_drop++;
-      return false;
+      return enforce() ? drop("sig-mismatch", pkt, tag) : wouldDrop("sig-mismatch", pkt, tag);
     }
 
     // Transitional mode: verify and count, but never hold/drop ordinary
     // traffic while enforcement is off.
     if (!enforce()) {
-      _would_drop++;
-      return false;
+      return wouldDrop("no-sig", pkt, tag);
     }
 
     // Message arrived before its signature: hold it in a compact buffer.
     uint8_t pending_limit = prefs.pending_max;
     if (pending_limit > SHADOW_PENDING_MAX) pending_limit = SHADOW_PENDING_MAX;
     if (pending_limit == 0) {
-      _dropped++;
-      return true;
+      return drop("pending-full", pkt, tag);
     }
 
     for (int i = 0; i < pending_limit; i++) {
       if (_pending[i].used
           && memcmp(_pending[i].msg_hash, hash16, SHADOW_MSG_HASH_SIZE) == 0) {
+        SHADOW_TRACE_PRINTLN("SHADOW RX DROP reason=pending-duplicate tag=%02X%02X%02X id=%02X%02X%02X%02X",
+                             tag[0], tag[1], tag[2],
+                             sig_id[0], sig_id[1], sig_id[2], sig_id[3]);
         return true;   // duplicate already waiting for the same signature
       }
     }
@@ -584,13 +695,17 @@ bool ShadowAuth::filterShadow(mesh::Mesh& mesh, mesh::Packet* pkt, const uint8_t
       slot = oldest;
       if (slot < 0) slot = 0;
       _pending_evicted++;
+      ShadowPendingEntry& old = _pending[slot];
+      MESH_DEBUG_PRINTLN("SHADOW RX EVICT pending slot=%d old_tag=%02X%02X%02X old_id=%02X%02X%02X%02X age=%lu",
+                         slot, old.tag[0], old.tag[1], old.tag[2],
+                         old.sig_id[0], old.sig_id[1], old.sig_id[2], old.sig_id[3],
+                         (unsigned long)(now_ms - old.created_ms));
     }
     ShadowPendingEntry& e = _pending[slot];
     memset(&e, 0, sizeof(e));
     e.len = pkt->writeTo(e.data);
     if (e.len == 0) {
-      _dropped++;
-      return true;
+      return drop("hold-write-fail", pkt, tag);
     }
     e.used = true;
     memcpy(e.tag, tag, SHADOW_TAG_SIZE);
@@ -598,19 +713,24 @@ bool ShadowAuth::filterShadow(mesh::Mesh& mesh, mesh::Packet* pkt, const uint8_t
     memcpy(e.msg_hash, hash16, SHADOW_MSG_HASH_SIZE);
     e.created_ms = now_ms;
     e.deadline_ms = now_ms + _hold_ttl_ms;
+    MESH_DEBUG_PRINTLN("SHADOW RX HOLD tag=%02X%02X%02X id=%02X%02X%02X%02X slot=%d ttl=%lu",
+                       tag[0], tag[1], tag[2],
+                       sig_id[0], sig_id[1], sig_id[2], sig_id[3],
+                       slot, (unsigned long)_hold_ttl_ms);
     return true;   // held, not forwarded yet
   }
 
   const uint8_t* signature = &pkt->payload[pkt->payload_len - SIGNATURE_SIZE];
   if (!verifyWithCandidates(tag, signature, digest)) {
     _bad_sig++;
-    if (enforce()) return true;
-    _would_drop++;
-    return false;
+    return enforce() ? drop("badsig", pkt, tag) : wouldDrop("badsig", pkt, tag);
   }
 
   _verified.insert(hash16);
   pkt->auth_ok = true;
+  MESH_DEBUG_PRINTLN("SHADOW RX ACCEPT verified mode=%s tag=%02X%02X%02X hash=%02X%02X%02X%02X",
+                     shadow::modeName(mode), tag[0], tag[1], tag[2],
+                     hash16[0], hash16[1], hash16[2], hash16[3]);
 
   if (mode == SHADOW_MODE_SIGNATURE) {
     uint8_t sig_id[SHADOW_SIG_ID_SIZE];
@@ -628,6 +748,9 @@ bool ShadowAuth::filterShadow(mesh::Mesh& mesh, mesh::Packet* pkt, const uint8_t
       if (memcmp(e.msg_hash, msg_hash, SHADOW_MSG_HASH_SIZE) != 0) continue;
       uint32_t wait = (uint32_t)(now_ms - e.created_ms);
       if (wait > 0) _ttl.addMsgWait(wait);
+      MESH_DEBUG_PRINTLN("SHADOW RX RELEASE pending tag=%02X%02X%02X id=%02X%02X%02X%02X wait=%lu",
+                         tag[0], tag[1], tag[2],
+                         sig_id[0], sig_id[1], sig_id[2], sig_id[3], (unsigned long)wait);
       releasePending(mesh, i);
       break;
     }
@@ -639,27 +762,33 @@ bool ShadowAuth::filterShadow(mesh::Mesh& mesh, mesh::Packet* pkt, const uint8_t
 
 bool ShadowAuth::filterOrdinary(mesh::Mesh& mesh, mesh::Packet* pkt, unsigned long now_ms) {
   (void)mesh;
-  if (!enforce()) return false;
+  if (!enforce()) {
+    SHADOW_TRACE_PRINTLN("SHADOW RX PASS ordinary type=%d route=%c len=%d enforce=0",
+                         pkt->getPayloadType(), pkt->isRouteDirect() ? 'D' : 'F',
+                         pkt->payload_len);
+    return false;
+  }
 
   uint8_t type = pkt->getPayloadType();
 
   if (type == PAYLOAD_TYPE_ANON_REQ) {
-    if (!prefs.allow_anon) { _dropped++; return true; }
-    if (pkt->payload_len < 1 + PUB_KEY_SIZE) { _dropped++; return true; }
+    if (!prefs.allow_anon) return drop("anon-disabled", pkt, NULL);
+    if (pkt->payload_len < 1 + PUB_KEY_SIZE) return drop("anon-short", pkt, NULL);
     const uint8_t* tag = &pkt->payload[1];
-    if (!rateAllow(_rate, tag, now_ms, 8)) { _dropped++; return true; }
+    if (!rateAllow(_rate, "anon", tag, now_ms, 8)) return drop("anon-rate", pkt, tag);
     pkt->auth_ok = true;   // explicit login/admin exception
+    SHADOW_TRACE_PRINTLN("SHADOW RX ACCEPT anon tag=%02X%02X%02X",
+                         tag[0], tag[1], tag[2]);
     return false;
   }
 
   if (type == PAYLOAD_TYPE_ADVERT) {
     const uint16_t min_len = PUB_KEY_SIZE + 4 + SIGNATURE_SIZE;
-    if (pkt->payload_len < min_len) { _dropped++; return true; }
+    if (pkt->payload_len < min_len) return drop("advert-short", pkt, NULL);
     const uint8_t* pub = pkt->payload;
-    if (!rateAllow(_advert_rate, pub, now_ms, 8)) { _dropped++; return true; }
+    if (!rateAllow(_advert_rate, "advert", pub, now_ms, 8)) return drop("advert-rate", pkt, pub);
     if (!prefs.allow_advert && !contains(pub)) {
-      _dropped++;
-      return true;
+      return drop("advert-policy", pkt, pub);
     }
     // Flood and zero-hop adverts are verified by Mesh::onRecvPacket(). A
     // direct transit advert is retransmitted by Mesh before the payload
@@ -668,29 +797,34 @@ bool ShadowAuth::filterOrdinary(mesh::Mesh& mesh, mesh::Packet* pkt, unsigned lo
     if (pkt->isRouteDirect() && pkt->getPathHashCount() > 0
         && !verifyAdvertPayload(pub, pkt->payload_len)) {
       _bad_sig++;
-      _dropped++;
-      return true;
+      return drop("advert-badsig", pkt, pub);
     }
     pkt->auth_ok = true;   // advert's own Ed25519 signature is checked by Mesh
+    SHADOW_TRACE_PRINTLN("SHADOW RX ACCEPT advert tag=%02X%02X%02X len=%d",
+                         pub[0], pub[1], pub[2], pkt->payload_len);
     return false;
   }
 
   if (type == PAYLOAD_TYPE_CONTROL) {
     if (pkt->isRouteDirect() && pkt->getPathHashCount() == 0) {
       pkt->auth_ok = true;
+      SHADOW_TRACE_PRINTLN("SHADOW RX ACCEPT control len=%d", pkt->payload_len);
       return false;
     }
-    _dropped++;
-    return true;
+    return drop("control-transit", pkt, NULL);
   }
 
   // ACK and every other ordinary payload require a shadow envelope.
-  _dropped++;
-  return true;
+  return drop("no-envelope", pkt, NULL);
 }
 
 bool ShadowAuth::filter(mesh::Mesh& mesh, mesh::Packet* pkt) {
-  if (!prefs.enabled) return false;
+  if (!prefs.enabled) {
+    SHADOW_TRACE_PRINTLN("SHADOW RX PASS disabled type=%d route=%c len=%d",
+                         pkt->getPayloadType(), pkt->isRouteDirect() ? 'D' : 'F',
+                         pkt->payload_len);
+    return false;
+  }
 
   unsigned long now_ms = mesh.getMillis();
   uint8_t tag[SHADOW_TAG_SIZE];
@@ -702,11 +836,13 @@ bool ShadowAuth::filter(mesh::Mesh& mesh, mesh::Packet* pkt) {
     memcpy(tag, &pkt->payload[SHADOW_CH_SIZE + SHADOW_MAGIC_SIZE], SHADOW_TAG_SIZE);
     flags = pkt->payload[SHADOW_COMMON_SIZE - 1];
     pkt->shadow_flags = flags;
+    SHADOW_TRACE_PRINTLN("SHADOW RX shadow mode=%s tag=%02X%02X%02X type=%d route=%c len=%d",
+                         shadow::modeName(shadow::modeOf(flags)),
+                         tag[0], tag[1], tag[2], pkt->getPayloadType(),
+                         pkt->isRouteDirect() ? 'D' : 'F', pkt->payload_len);
 
     if (shadow::versionOf(flags) != SHADOW_VERSION) {
-      if (enforce()) { _dropped++; return true; }
-      _would_drop++;
-      return false;
+      return enforce() ? drop("bad-version", pkt, tag) : wouldDrop("bad-version", pkt, tag);
     }
     return filterShadow(mesh, pkt, tag, flags, now_ms);
   }
@@ -718,13 +854,24 @@ void ShadowAuth::sweep(unsigned long now_ms) {
   for (int i = 0; i < SHADOW_PENDING_MAX; i++) {
     ShadowPendingEntry& e = _pending[i];
     if (e.used && (long)(now_ms - e.deadline_ms) >= 0) {
+      unsigned long age = now_ms - e.created_ms;
+      unsigned long ttl = e.deadline_ms - e.created_ms;
+      MESH_DEBUG_PRINTLN("SHADOW RX DROP reason=pending-expired tag=%02X%02X%02X id=%02X%02X%02X%02X age=%lu ttl=%lu",
+                         e.tag[0], e.tag[1], e.tag[2],
+                         e.sig_id[0], e.sig_id[1], e.sig_id[2], e.sig_id[3],
+                         age, ttl);
       e.used = false;
       _dropped++;
     }
   }
   for (int i = 0; i < SHADOW_SIG_CACHE_SIZE; i++) {
     ShadowSigEntry& e = _sig[i];
-    if (e.used && (long)(now_ms - e.expiry_ms) >= 0) e.used = false;
+    if (e.used && (long)(now_ms - e.expiry_ms) >= 0) {
+      SHADOW_TRACE_PRINTLN("SHADOW: sig-cache sweep expired tag=%02X%02X%02X id=%02X%02X%02X%02X",
+                           e.tag[0], e.tag[1], e.tag[2],
+                           e.sig_id[0], e.sig_id[1], e.sig_id[2], e.sig_id[3]);
+      e.used = false;
+    }
   }
 }
 
@@ -736,6 +883,7 @@ void ShadowAuth::poll(mesh::Mesh& mesh, unsigned long now_ms) {
   if ((unsigned long)(now_ms - _last_persist_ms) >= 3600000UL) {
     _last_persist_ms = now_ms;
     _prefs_dirty = true;
+    SHADOW_TRACE_PRINTLN("SHADOW: hourly prefs persist requested");
   }
 }
 
@@ -744,6 +892,8 @@ bool ShadowAuth::allow(const uint8_t* pub_key, uint32_t now_epoch) {
     if ((_allow[i].flags & 1) && memcmp(_allow[i].pub_key, pub_key, PUB_KEY_SIZE) == 0) {
       _allow[i].last_seen = now_epoch;
       _allow_dirty = true;
+      SHADOW_TRACE_PRINTLN("SHADOW ACL refresh tag=%02X%02X%02X count=%d",
+                           pub_key[0], pub_key[1], pub_key[2], getNumAllowed());
       return true;
     }
   }
@@ -753,9 +903,13 @@ bool ShadowAuth::allow(const uint8_t* pub_key, uint32_t now_epoch) {
       _allow[i].flags = 1;
       _allow[i].last_seen = now_epoch;
       _allow_dirty = true;
+      MESH_DEBUG_PRINTLN("SHADOW ACL add tag=%02X%02X%02X count=%d",
+                         pub_key[0], pub_key[1], pub_key[2], getNumAllowed());
       return true;
     }
   }
+  MESH_DEBUG_PRINTLN("SHADOW ACL full tag=%02X%02X%02X",
+                     pub_key[0], pub_key[1], pub_key[2]);
   return false;
 }
 
@@ -773,9 +927,13 @@ bool ShadowAuth::remove(const uint8_t* pub_key) {
       for (int k = 0; k < SHADOW_PENDING_MAX; k++) {
         if (_pending[k].used && memcmp(_pending[k].tag, pub_key, SHADOW_TAG_SIZE) == 0) _pending[k].used = false;
       }
+      MESH_DEBUG_PRINTLN("SHADOW ACL remove tag=%02X%02X%02X count=%d",
+                         pub_key[0], pub_key[1], pub_key[2], getNumAllowed());
       return true;
     }
   }
+  SHADOW_TRACE_PRINTLN("SHADOW ACL remove not-found tag=%02X%02X%02X",
+                       pub_key[0], pub_key[1], pub_key[2]);
   return false;
 }
 
@@ -968,8 +1126,6 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     }
     if (!allow(pub)) { snprintf(reply, reply_len, "Err - allowlist full"); return true; }
     _allow_dirty = true;
-    MESH_DEBUG_PRINTLN("shd.allow -> tag=%02X%02X%02X keys=%d",
-                       pub[0], pub[1], pub[2], getNumAllowed());
     snprintf(reply, reply_len, "OK");
     return true;
   }
@@ -981,8 +1137,6 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     }
     if (!remove(pub)) { snprintf(reply, reply_len, "Err - not found"); return true; }
     _allow_dirty = true;
-    MESH_DEBUG_PRINTLN("shd.remove -> tag=%02X%02X%02X keys=%d",
-                       pub[0], pub[1], pub[2], getNumAllowed());
     snprintf(reply, reply_len, "OK");
     return true;
   }

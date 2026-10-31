@@ -202,6 +202,20 @@ The allowlist is stored in `/shadow_acl`. The normal profile keeps 128
 public keys (32 on the low-memory profile); when full, `shd.allow` returns
 `Err - allowlist full` and entries must be freed with `shd.remove`.
 
+## Debug logging
+
+Build with `-DMESH_DEBUG=1` to get `SHADOW ...` decision logs: drops with
+reasons, successful verification/unwrap, pending/signature cache lifecycle,
+fragment reassembly, ACL changes and persistence errors.
+
+`-DMESH_PACKET_LOGGING=1` additionally enables per-packet `SHADOW TRACE:`
+lines (dedup hits, ordinary pass-through, rate limits, transport codes and
+TX wrapper details).
+
+Both are compile-time flags; release builds have the logs compiled out.
+Per-packet logging is synchronous and can affect timing on a busy repeater,
+so use it for active debugging rather than long unattended runs.
+
 ## 160-byte text
 
 A 160-byte chat message produces an inner payload of about 180 bytes, which is

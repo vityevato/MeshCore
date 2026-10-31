@@ -125,7 +125,10 @@ class ShadowAuth {
 #endif
 
   void updateTtls();
-  bool rateAllow(TagRate* table, const uint8_t* tag, unsigned long now_ms, uint16_t max_per_min);
+  bool drop(const char* reason, const mesh::Packet* pkt, const uint8_t* tag = NULL);
+  bool wouldDrop(const char* reason, const mesh::Packet* pkt, const uint8_t* tag = NULL);
+  bool rateAllow(TagRate* table, const char* table_name, const uint8_t* tag,
+                 unsigned long now_ms, uint16_t max_per_min);
   bool hasAllowedTag(const uint8_t* tag) const;
   ShadowSigEntry* findSig(const uint8_t* tag, const uint8_t* sig_id, unsigned long now_ms);
   void insertSig(const uint8_t* tag, const uint8_t* sig_id, const uint8_t* msg_hash, unsigned long now_ms);
