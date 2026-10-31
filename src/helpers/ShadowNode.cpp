@@ -604,6 +604,7 @@ bool ShadowNode::handleCommand(const char* command, char* reply, size_t reply_le
   if (strcmp(name, "shd.enabled") == 0) {
     if (!parseOnOff(args, &b)) { snprintf(reply, reply_len, "Err - on|off"); return true; }
     _enabled = b;
+    MESH_DEBUG_PRINTLN("shd.enabled -> %s", b ? "on" : "off");
     snprintf(reply, reply_len, "OK - shadow %s", b ? "enabled" : "disabled");
     return true;
   }
@@ -613,6 +614,7 @@ bool ShadowNode::handleCommand(const char* command, char* reply, size_t reply_le
     else if (strcmp(args, "detached") == 0) _mode = SHADOW_MODE_MESSAGE;
     else if (strcmp(args, "fragment") == 0) _mode = SHADOW_MODE_FRAGMENT;
     else { snprintf(reply, reply_len, "Err - auto|embedded|detached|fragment"); return true; }
+    MESH_DEBUG_PRINTLN("shd.mode -> %s", args);
     snprintf(reply, reply_len, "OK");
     return true;
   }

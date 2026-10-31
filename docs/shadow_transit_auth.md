@@ -190,10 +190,13 @@ shd.mode auto|embedded|detached|fragment
 shd.status
 ```
 
-`shd.status` on a repeater reports enforcement, pending/signature/allowlist
-usage, observed delays and current TTLs. `shd.stats` reports the drop
-counters. On a node `shd.status` reports the mode, counters and fragment
-reassembly state.
+`shd.status` on a repeater reports whether shadow is enabled, enforcement,
+pending/signature/allowlist usage, observed delays and current TTLs.
+`shd.stats` reports the drop counters. On a node `shd.status` reports the
+mode, counters and fragment reassembly state.
+
+With `MESH_DEBUG=1`, every successful `shd.*` setting change is logged on the
+serial console as `DEBUG: shd.<name> -> <value>`.
 
 The allowlist is stored in `/shadow_acl`. The normal profile keeps 128
 public keys (32 on the low-memory profile); when full, `shd.allow` returns

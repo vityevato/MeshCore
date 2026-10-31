@@ -832,8 +832,8 @@ transit-packet rate limit. The policy is enforced while `shd.enforce on`.
 **Usage:**
 - `shd.status`
 
-Reports enforcement, pending/signature cache usage, allowlist usage
-(`allow=used/max`), observed delays and current TTLs.
+Reports whether shadow is enabled, enforcement, pending/signature cache usage,
+allowlist usage (`allow=used/max`), observed delays and current TTLs.
 
 ---
 

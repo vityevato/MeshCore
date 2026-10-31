@@ -26,21 +26,23 @@ static File shadowOpenRead(FILESYSTEM* fs, const char* filename) {
 #endif
 
 void ShadowPrefs::structure() {
-  def("shd.enabled", enabled);
-  def("shd.enforce", enforce);
-  def("shd.allow.anon", allow_anon);
-  def("shd.allow.advert", allow_advert);
-  def("shd.auto.add", auto_add);
-  def("shd.pending.max", pending_max);
-  def("shd.hold.min", hold_min_ms);
-  def("shd.hold.max", hold_max_ms);
-  def("shd.hold.default", hold_default_ms);
-  def("shd.margin", margin_ms);
-  def("shd.max.msg.wait", max_msg_wait_ms);
-  def("shd.max.sig.wait", max_sig_wait_ms);
-  def("shd.max.frag.gap", max_frag_gap_ms);
-  def("shd.saved", saved_at);
-  def("shd.acl.migrated", acl_migrated);
+  // ConfigSerializer keys accept only [A-Za-z0-9_]. The dotted names are CLI
+  // command names, not persisted keys; dots here make the whole file unreadable.
+  def("shd_enabled", enabled);
+  def("shd_enforce", enforce);
+  def("shd_allow_anon", allow_anon);
+  def("shd_allow_advert", allow_advert);
+  def("shd_auto_add", auto_add);
+  def("shd_pending_max", pending_max);
+  def("shd_hold_min", hold_min_ms);
+  def("shd_hold_max", hold_max_ms);
+  def("shd_hold_default", hold_default_ms);
+  def("shd_margin", margin_ms);
+  def("shd_max_msg_wait", max_msg_wait_ms);
+  def("shd_max_sig_wait", max_sig_wait_ms);
+  def("shd_max_frag_gap", max_frag_gap_ms);
+  def("shd_saved", saved_at);
+  def("shd_acl_migrated", acl_migrated);
 }
 
 // ---------------------------------------------------------------------------
@@ -805,10 +807,11 @@ void ShadowAuth::formatStatus(char* reply, size_t reply_len) const {
   for (int i = 0; i < SHADOW_SIG_CACHE_SIZE; i++) if (_sig[i].used) sigs++;
 
   snprintf(reply, reply_len,
-           "enforce=%d pend=%d/%d sig=%d/%d allow=%d/%d\n"
+           "enabled=%d enforce=%d pend=%d/%d sig=%d/%d allow=%d/%d\n"
            "ttl hold=%lu sig=%lu frag=%lu\n"
            "max msg=%lu sig=%lu frag=%lu",
-           (int)prefs.enforce, pending, (int)prefs.pending_max, sigs, SHADOW_SIG_CACHE_SIZE,
+           (int)prefs.enabled, (int)prefs.enforce,
+           pending, (int)prefs.pending_max, sigs, SHADOW_SIG_CACHE_SIZE,
            getNumAllowed(), SHADOW_MAX_ALLOW,
            (unsigned long)_hold_ttl_ms, (unsigned long)_sig_ttl_ms,
            (unsigned long)_frag_ttl_ms,
@@ -862,6 +865,7 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     if (!parseOnOff(args, &b)) { snprintf(reply, reply_len, "Err - on|off"); return true; }
     prefs.enabled = b;
     _prefs_dirty = true;
+    MESH_DEBUG_PRINTLN("shd.enabled -> %s", b ? "on" : "off");
     snprintf(reply, reply_len, "OK - shadow %s", b ? "enabled" : "disabled");
     return true;
   }
@@ -869,6 +873,7 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     if (!parseOnOff(args, &b)) { snprintf(reply, reply_len, "Err - on|off"); return true; }
     prefs.enforce = b;
     _prefs_dirty = true;
+    MESH_DEBUG_PRINTLN("shd.enforce -> %s", b ? "on" : "off");
     snprintf(reply, reply_len, "OK - enforce %s", b ? "on" : "off");
     return true;
   }
@@ -876,6 +881,7 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     if (!parseOnOff(args, &b)) { snprintf(reply, reply_len, "Err - on|off"); return true; }
     prefs.allow_anon = b;
     _prefs_dirty = true;
+    MESH_DEBUG_PRINTLN("shd.allow.anon -> %s", b ? "on" : "off");
     snprintf(reply, reply_len, "OK");
     return true;
   }
@@ -883,6 +889,7 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     if (!parseOnOff(args, &b)) { snprintf(reply, reply_len, "Err - on|off"); return true; }
     prefs.allow_advert = b;
     _prefs_dirty = true;
+    MESH_DEBUG_PRINTLN("shd.allow.advert -> %s", b ? "on" : "off");
     snprintf(reply, reply_len, "OK");
     return true;
   }
@@ -890,6 +897,7 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     if (!parseOnOff(args, &b)) { snprintf(reply, reply_len, "Err - on|off"); return true; }
     prefs.auto_add = b;
     _prefs_dirty = true;
+    MESH_DEBUG_PRINTLN("shd.auto.add -> %s", b ? "on" : "off");
     snprintf(reply, reply_len, "OK");
     return true;
   }
@@ -898,6 +906,7 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     if (v < 1 || v > SHADOW_PENDING_MAX) { snprintf(reply, reply_len, "Err - 1..%d", SHADOW_PENDING_MAX); return true; }
     prefs.pending_max = (uint8_t)v;
     _prefs_dirty = true;
+    MESH_DEBUG_PRINTLN("shd.pending.max -> %u", (unsigned)prefs.pending_max);
     snprintf(reply, reply_len, "OK");
     return true;
   }
@@ -907,6 +916,9 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     if (prefs.hold_default_ms < prefs.hold_min_ms) prefs.hold_default_ms = prefs.hold_min_ms;
     _prefs_dirty = true;
     updateTtls();
+    MESH_DEBUG_PRINTLN("shd.hold.min -> %lu ms (max=%lu default=%lu)",
+                       (unsigned long)prefs.hold_min_ms, (unsigned long)prefs.hold_max_ms,
+                       (unsigned long)prefs.hold_default_ms);
     snprintf(reply, reply_len, "OK");
     return true;
   }
@@ -915,6 +927,8 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     if (prefs.hold_default_ms > prefs.hold_max_ms) prefs.hold_default_ms = prefs.hold_max_ms;
     _prefs_dirty = true;
     updateTtls();
+    MESH_DEBUG_PRINTLN("shd.hold.max -> %lu ms (default=%lu)",
+                       (unsigned long)prefs.hold_max_ms, (unsigned long)prefs.hold_default_ms);
     snprintf(reply, reply_len, "OK");
     return true;
   }
@@ -922,6 +936,7 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     prefs.hold_default_ms = clampU32(strtoul(args, NULL, 10), prefs.hold_min_ms, prefs.hold_max_ms);
     _prefs_dirty = true;
     updateTtls();
+    MESH_DEBUG_PRINTLN("shd.hold.default -> %lu ms", (unsigned long)prefs.hold_default_ms);
     snprintf(reply, reply_len, "OK");
     return true;
   }
@@ -929,6 +944,7 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     prefs.margin_ms = clampU32(strtoul(args, NULL, 10), 0, 60000);
     _prefs_dirty = true;
     updateTtls();
+    MESH_DEBUG_PRINTLN("shd.margin -> %lu ms", (unsigned long)prefs.margin_ms);
     snprintf(reply, reply_len, "OK");
     return true;
   }
@@ -952,6 +968,8 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     }
     if (!allow(pub)) { snprintf(reply, reply_len, "Err - allowlist full"); return true; }
     _allow_dirty = true;
+    MESH_DEBUG_PRINTLN("shd.allow -> tag=%02X%02X%02X keys=%d",
+                       pub[0], pub[1], pub[2], getNumAllowed());
     snprintf(reply, reply_len, "OK");
     return true;
   }
@@ -963,6 +981,8 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     }
     if (!remove(pub)) { snprintf(reply, reply_len, "Err - not found"); return true; }
     _allow_dirty = true;
+    MESH_DEBUG_PRINTLN("shd.remove -> tag=%02X%02X%02X keys=%d",
+                       pub[0], pub[1], pub[2], getNumAllowed());
     snprintf(reply, reply_len, "OK");
     return true;
   }

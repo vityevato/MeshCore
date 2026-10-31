@@ -201,6 +201,58 @@ static void copyRaw(const Packet* src, Packet* dst) {
   ASSERT_TRUE(dst->readFrom(raw, len));
 }
 
+class PrefsWriteStream : public Stream {
+  char _buf[1024];
+  size_t _len = 0;
+
+  size_t printSigned(long long value) {
+    char text[24];
+    snprintf(text, sizeof(text), "%lld", value);
+    return Print::print(text);
+  }
+
+  size_t printUnsigned(unsigned long long value) {
+    char text[24];
+    snprintf(text, sizeof(text), "%llu", value);
+    return Print::print(text);
+  }
+
+public:
+  size_t write(uint8_t b) override {
+    if (_len + 1 >= sizeof(_buf)) return 0;
+    _buf[_len++] = (char)b;
+    _buf[_len] = 0;
+    return 1;
+  }
+
+  size_t print(unsigned char v, int) override { return printUnsigned(v); }
+  size_t print(int v, int) override { return printSigned(v); }
+  size_t print(unsigned int v, int) override { return printUnsigned(v); }
+  size_t print(long v, int) override { return printSigned(v); }
+  size_t print(unsigned long v, int) override { return printUnsigned(v); }
+  size_t print(long long v, int) override { return printSigned(v); }
+  size_t print(unsigned long long v, int) override { return printUnsigned(v); }
+  size_t print(double v, int p = 2) override {
+    char text[32];
+    snprintf(text, sizeof(text), "%.*f", p, v);
+    return Print::print(text);
+  }
+
+  const char* data() const { return _buf; }
+};
+
+class PrefsReadStream : public Stream {
+  const char* _text;
+  int _pos = 0;
+  int _len;
+
+public:
+  explicit PrefsReadStream(const char* text) : _text(text), _len((int)strlen(text)) { }
+  int available() override { return _len - _pos; }
+  int read() override { return _pos < _len ? (uint8_t)_text[_pos++] : -1; }
+  int peek() override { return _pos < _len ? (uint8_t)_text[_pos] : -1; }
+};
+
 } // namespace
 
 TEST(ShadowConstants, SizesMatchPlan) {
@@ -217,6 +269,53 @@ TEST(ShadowConstants, SizesMatchPlan) {
   EXPECT_EQ(SHADOW_MAX_INNER_EMBEDDED, 112);
   EXPECT_EQ(SHADOW_MAX_INNER_MSG, 172);
   EXPECT_EQ(SHADOW_MAX_FRAG_PAYLOAD, 106);
+}
+
+TEST(ShadowPrefs, SerializationRoundTrip) {
+  ShadowPrefs saved;
+  saved.enabled = 1;
+  saved.enforce = 1;
+  saved.allow_anon = 0;
+  saved.allow_advert = 1;
+  saved.auto_add = 0;
+  saved.pending_max = 7;
+  saved.hold_min_ms = 5000;
+  saved.hold_max_ms = 120000;
+  saved.hold_default_ms = 45000;
+  saved.margin_ms = 3000;
+  saved.max_msg_wait_ms = 4200;
+  saved.max_sig_wait_ms = 9100;
+  saved.max_frag_gap_ms = 1500;
+  saved.saved_at = 123456789;
+  saved.acl_migrated = 1;
+
+  PrefsWriteStream out;
+  ASSERT_TRUE(saved.saveSerial(out));
+
+  // Persisted keys must use the ConfigSerializer charset; a dotted key makes
+  // the whole file unreadable after a reboot.
+  EXPECT_NE(strstr(out.data(), "shd_enforce:1"), nullptr);
+  EXPECT_EQ(strchr(out.data(), '.'), nullptr);
+
+  ShadowPrefs loaded;
+  PrefsReadStream in(out.data());
+  ASSERT_TRUE(loaded.loadSerial(in));
+
+  EXPECT_EQ(loaded.enabled, saved.enabled);
+  EXPECT_EQ(loaded.enforce, saved.enforce);
+  EXPECT_EQ(loaded.allow_anon, saved.allow_anon);
+  EXPECT_EQ(loaded.allow_advert, saved.allow_advert);
+  EXPECT_EQ(loaded.auto_add, saved.auto_add);
+  EXPECT_EQ(loaded.pending_max, saved.pending_max);
+  EXPECT_EQ(loaded.hold_min_ms, saved.hold_min_ms);
+  EXPECT_EQ(loaded.hold_max_ms, saved.hold_max_ms);
+  EXPECT_EQ(loaded.hold_default_ms, saved.hold_default_ms);
+  EXPECT_EQ(loaded.margin_ms, saved.margin_ms);
+  EXPECT_EQ(loaded.max_msg_wait_ms, saved.max_msg_wait_ms);
+  EXPECT_EQ(loaded.max_sig_wait_ms, saved.max_sig_wait_ms);
+  EXPECT_EQ(loaded.max_frag_gap_ms, saved.max_frag_gap_ms);
+  EXPECT_EQ(loaded.saved_at, saved.saved_at);
+  EXPECT_EQ(loaded.acl_migrated, saved.acl_migrated);
 }
 
 TEST(ShadowVerifiedCache, InsertContainsEvicts) {
@@ -304,12 +403,31 @@ TEST(ShadowAuth, StatusIncludesAllowListAndFits) {
   auth.formatStatus(buf, sizeof(buf));
 
   EXPECT_LT(strlen(buf), sizeof(buf));
+  EXPECT_NE(strstr(buf, "enabled=1"), nullptr);
   char expected[32];
   snprintf(expected, sizeof(expected), "allow=1/%d", SHADOW_MAX_ALLOW);
   EXPECT_NE(strstr(buf, expected), nullptr);
   // Counters live in shd.stats now; status must stay short and stable.
   EXPECT_EQ(strstr(buf, "drop="), nullptr);
   EXPECT_EQ(strstr(buf, "evict="), nullptr);
+}
+
+TEST(ShadowAuth, StatusReportsEnabledState) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc;
+  TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+
+  ShadowAuth auth;
+  auth.begin();
+  char buf[160];
+
+  ASSERT_TRUE(auth.handleCommand(mesh, "shd.enabled off", buf, sizeof(buf)));
+  auth.formatStatus(buf, sizeof(buf));
+  EXPECT_NE(strstr(buf, "enabled=0"), nullptr);
+
+  ASSERT_TRUE(auth.handleCommand(mesh, "shd.enabled on", buf, sizeof(buf)));
+  auth.formatStatus(buf, sizeof(buf));
+  EXPECT_NE(strstr(buf, "enabled=1"), nullptr);
 }
 
 TEST(ShadowAuth, StatsFitLargeCounters) {
