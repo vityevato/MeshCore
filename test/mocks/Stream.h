@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdarg.h>
+#include <stdio.h>
 
 // Mock Stream class for native testing
 // Provides minimal interface needed by Utils.h
@@ -44,6 +46,15 @@ public:
 
     size_t print(char c) { return write(c); }
     size_t print(const char* str) { return write(str); }
+
+    int printf(const char* format, ...) {
+        char buf[160];
+        va_list args;
+        va_start(args, format);
+        int n = vsnprintf(buf, sizeof(buf), format, args);
+        va_end(args);
+        return n;
+    }
 
     //size_t println(void)  { return 0; }
     

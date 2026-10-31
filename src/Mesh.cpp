@@ -44,7 +44,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
   // so it only unwraps traffic addressed to itself and forwards the rest
   // unchanged.
   bool was_shadow = false;
-  if (_shadow_recv != NULL && isShadowPacket(pkt)) {
+  if (!pkt->local_only && _shadow_recv != NULL && isShadowPacket(pkt)) {
     was_shadow = true;
     if (_shadow_recv->unwrapAndProcess(*this, pkt)) {
       return ACTION_RELEASE;
@@ -67,7 +67,9 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       uint16_t offset = (uint16_t)pkt->path_len << path_sz;
       if (offset >= len) {   // TRACE has reached end of given path
         onTraceRecv(pkt, trace_tag, auth_code, flags, pkt->path, &pkt->payload[i], len);
-      } else if (self_id.isHashMatch(&pkt->payload[i + offset], 1 << path_sz) && allowPacketForward(pkt) && !_tables->wasSeen(pkt)) {
+      } else if (!pkt->local_only
+                 && self_id.isHashMatch(&pkt->payload[i + offset], 1 << path_sz)
+                 && allowPacketForward(pkt) && !_tables->wasSeen(pkt)) {
         _tables->markSeen(pkt);
         // append SNR (Not hash!)
         pkt->path[pkt->path_len++] = (int8_t) (pkt->getSNR()*4);
@@ -87,7 +89,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
     return ACTION_RELEASE;
   }
 
-  if (pkt->isRouteDirect() && pkt->getPathHashCount() > 0) {
+  if (pkt->isRouteDirect() && pkt->getPathHashCount() > 0 && !pkt->local_only) {
     // check for 'early received' ACK
     if (pkt->getPayloadType() == PAYLOAD_TYPE_ACK) {
       int i = 0;
@@ -121,7 +123,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
     return ACTION_RELEASE;   // this node is NOT the next hop (OR this packet has already been forwarded), so discard.
   }
 
-  if (pkt->isRouteFlood() && filterRecvFloodPacket(pkt)) return ACTION_RELEASE;
+  if (pkt->isRouteFlood() && !pkt->local_only && filterRecvFloodPacket(pkt)) return ACTION_RELEASE;
 
   DispatcherAction action = ACTION_RELEASE;
 
@@ -361,6 +363,7 @@ void Mesh::removeSelfFromPath(Packet* pkt) {
 }
 
 DispatcherAction Mesh::routeRecvPacket(Packet* packet) {
+  if (packet->local_only) return ACTION_RELEASE;   // reassembled for local delivery only
   uint8_t n = packet->getPathHashCount();
   if (packet->isRouteFlood() && !packet->isMarkedDoNotRetransmit()
     && (n + 1)*packet->getPathHashSize() <= MAX_PATH_SIZE && allowPacketForward(packet)) {

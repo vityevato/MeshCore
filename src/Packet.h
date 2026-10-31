@@ -55,6 +55,7 @@ public:
   bool    shadow_wrapped;  // locally built shadow packet: do not wrap again
   bool    auth_ok;         // source was verified (or explicitly allowed) by a repeater
   bool    recv_filtered;   // early shadow/transit filter has already seen this packet
+  bool    local_only;      // reassembled locally: deliver, never retransmit
   uint8_t shadow_flags;    // envelope flags (version + mode)
 
   /**

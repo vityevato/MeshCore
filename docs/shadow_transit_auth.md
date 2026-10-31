@@ -114,14 +114,18 @@ Policy:
 The advert rate limit is 8 adverts per minute per tag and is separate from the
 transit-packet budget, so normal shadow traffic does not consume an
 allowlisted node's advert allowance. Ordinary and wrapped adverts share the
-same advert budget.
+same advert budget. An exact duplicate already accepted through the
+`VerifiedHashCache` fast-path does not consume another advert slot.
 
 The same policy applies to ordinary (non-wrapped) adverts sent by old nodes.
 `on` is an explicit discovery exception: the inner advert's own signature is
-the trust anchor. For detached adverts from an unknown sender, enforcing
-repeaters drop the separate shadow signature packet, but the message packet
-still passes because the advert is self-authenticating. This costs one extra
-90-byte signature packet; it does not affect correctness.
+the trust anchor. For wrapped adverts the outer shadow signature is not the
+trust anchor and is not checked; path bytes, path hash size and outer
+transport codes are routing metadata and are not authenticated for adverts.
+For detached adverts from an unknown sender, enforcing repeaters drop the
+separate shadow signature packet, but the message packet still passes because
+the advert is self-authenticating. This costs one extra 90-byte signature
+packet; it does not affect correctness.
 
 Ordinary adverts are signature-checked by `Mesh` for flood and zero-hop
 traffic. A crafted direct advert with a non-empty path is retransmitted by
@@ -222,15 +226,19 @@ pending 8, verified cache 64, signature cache 8, fragment reassembly 2
 - Old repeaters see a normal `GRP_TXT` with an unknown channel hash and forward
   it. All modes fit the old limits (`payload <= 184`, raw packet `<= 255`).
 - Old nodes ignore the unknown group channel. New nodes unwrap it.
-- Scoped floods are supported: the outer transport code is computed after the
-  shadow signature, over the final wire packet, so it matches the standard
-  `TransportKey::calcTransportCode()` used by legacy region-aware repeaters.
-  `flood.max.unscoped=0` networks work. Transport codes are not part of the
-  shadow signature; like the path, they are routing metadata.
+- Scoped flood support is implemented: the outer transport code is computed
+  after the shadow signature, over the final wire packet, so it matches the
+  standard `TransportKey::calcTransportCode()` used by legacy region-aware
+  repeaters. Native tests cover the transport-code derivation and
+  `RegionMap::findMatch()`; real-device/runtime validation of scoped floods is
+  still pending. Transport codes are not part of the shadow signature; like
+  the path, they are routing metadata.
 - A companion with repeating enabled processes a received flood packet for
   itself and forwards the original shadow envelope, so downstream enforcing
-  repeaters still receive the signed packet. Locally reassembled fragments are
-  the exception: fragment forwarding remains unsupported.
+  repeaters still receive the signed packet. For fragments, every original
+  fragment is forwarded unchanged; the reassembled payload is delivered
+  locally as a local-only packet and is never retransmitted as ordinary
+  traffic.
 - The path is not authenticated. An attacker can alter the route, but not the
   source identity or inner payload.
 - Anybody who knows `shadow_ch`/`magic` can recognize the channel. The fixed
@@ -244,5 +252,8 @@ pending 8, verified cache 64, signature cache 8, fragment reassembly 2
 - The shadow envelope has not had a public release yet. Development builds made
   before the final format change are not wire-compatible and must be reflashed
   together; there is no mixed-shadow-version support.
+- Validation status: native unit tests and firmware builds pass. On-device
+  runtime validation of scoped floods, multi-hop forwarding, airtime and
+  long-run stability is still pending.
 - Rollback is `shd.enforce off`: the repeater verifies and counts but forwards
   everything.

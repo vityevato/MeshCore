@@ -325,18 +325,22 @@ ShadowSigEntry* ShadowAuth::findSig(const uint8_t* tag, const uint8_t* sig_id, u
   return NULL;
 }
 
-void ShadowAuth::insertSig(const uint8_t* tag, const uint8_t* sig_id,
-                           const uint8_t* msg_hash, unsigned long now_ms) {
+int ShadowAuth::oldestSigSlot(const ShadowSigEntry* entries, int count) {
   int slot = -1;
   unsigned long oldest = 0;
-  for (int i = 0; i < SHADOW_SIG_CACHE_SIZE; i++) {
-    if (!_sig[i].used) { slot = i; break; }
-    if (slot < 0 || (long)(_sig[i].expiry_ms - oldest) < 0) {
-      oldest = _sig[i].expiry_ms;
+  for (int i = 0; i < count; i++) {
+    if (!entries[i].used) return i;
+    if (slot < 0 || (long)(entries[i].expiry_ms - oldest) < 0) {
+      oldest = entries[i].expiry_ms;
       slot = i;
     }
   }
-  if (slot < 0) slot = 0;
+  return slot < 0 ? 0 : slot;
+}
+
+void ShadowAuth::insertSig(const uint8_t* tag, const uint8_t* sig_id,
+                           const uint8_t* msg_hash, unsigned long now_ms) {
+  int slot = oldestSigSlot(_sig, SHADOW_SIG_CACHE_SIZE);
   ShadowSigEntry& e = _sig[slot];
   e.used = true;
   memcpy(e.tag, tag, SHADOW_TAG_SIZE);

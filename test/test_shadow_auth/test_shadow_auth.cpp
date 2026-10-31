@@ -3,6 +3,7 @@
 #include <helpers/ShadowNode.h>
 #include <helpers/SimpleMeshTables.h>
 #include <helpers/TransportKeyStore.h>
+#include <helpers/RegionMap.h>
 
 #include <string.h>
 
@@ -69,7 +70,7 @@ public:
         Packet* p = &_pool[i];
         p->header = 0; p->payload_len = 0; p->path_len = 0;
         p->shadow = false; p->shadow_wrapped = false; p->auth_ok = false;
-        p->recv_filtered = false; p->shadow_flags = 0;
+        p->recv_filtered = false; p->local_only = false; p->shadow_flags = 0;
         return p;
       }
     }
@@ -155,6 +156,29 @@ public:
   void onAdvertRecv(mesh::Packet*, const mesh::Identity&, uint32_t,
                     const uint8_t*, size_t) override {
     adverts++;
+  }
+};
+
+class GroupForwardingTestMesh : public TestMesh {
+public:
+  GroupChannel channel;
+  int groups = 0;
+
+  GroupForwardingTestMesh(TestRadio& radio, TestClock& clock, TestRng& rng, TestRtc& rtc,
+                          TestPacketManager& mgr, SimpleMeshTables& tables)
+    : TestMesh(radio, clock, rng, rtc, mgr, tables) {}
+
+  bool allowPacketForward(const mesh::Packet*) override { return true; }
+  DispatcherAction recv(mesh::Packet* p) { return Mesh::onRecvPacket(p); }
+
+  int searchChannelsByHash(const uint8_t* hash, GroupChannel channels[], int max_matches) override {
+    if (max_matches < 1 || memcmp(hash, channel.hash, PATH_HASH_SIZE) != 0) return 0;
+    channels[0] = channel;
+    return 1;
+  }
+
+  void onGroupDataRecv(mesh::Packet*, uint8_t, const GroupChannel&, uint8_t*, size_t) override {
+    groups++;
   }
 };
 
@@ -372,7 +396,8 @@ static mesh::Packet* makeWrappedAdvert(TestMesh& mesh, TestPacketManager& mgr, u
 }
 
 static mesh::Packet* makeScopedAdvert(TestMesh& mesh, TestPacketManager& mgr, ShadowNode& node,
-                                      const TransportKey& key, uint8_t app_len) {
+                                      const TransportKey& key, uint8_t app_len,
+                                      uint8_t path_hash_size = 1) {
   uint8_t app[MAX_ADVERT_DATA_SIZE];
   memset(app, 0x6B, app_len);
   mesh::Packet* adv = mesh.createAdvert(mesh.self_id, app, app_len);
@@ -383,7 +408,24 @@ static mesh::Packet* makeScopedAdvert(TestMesh& mesh, TestPacketManager& mgr, Sh
   codes[0] = key.calcTransportCode(adv);
   codes[1] = 0;
   node.setTransportKey(key.key);
-  mesh.sendFlood(adv, codes, 0, 1);
+  mesh.sendFlood(adv, codes, 0, path_hash_size);
+  node.setTransportKey(NULL);
+  return mgr.getNextOutbound(100000);
+}
+
+static mesh::Packet* makeScopedRaw(TestMesh& mesh, TestPacketManager& mgr, ShadowNode& node,
+                                   const TransportKey& key, uint8_t path_hash_size,
+                                   const uint8_t* payload, uint16_t len) {
+  mesh::Packet* inner = mesh.createRawData(payload, len);
+  if (inner == nullptr) return nullptr;
+  inner->header = (uint8_t)((PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD);
+  inner->path_len = 0;
+
+  uint16_t codes[2];
+  codes[0] = key.calcTransportCode(inner);
+  codes[1] = 0;
+  node.setTransportKey(key.key);
+  mesh.sendFlood(inner, codes, 0, path_hash_size);
   node.setTransportKey(NULL);
   return mgr.getNextOutbound(100000);
 }
@@ -954,6 +996,7 @@ TEST(ShadowAuth, AdvertRateLimitRejectsNinthAdvert) {
   auth.getPrefs().enforce = 1;
   auth.getPrefs().allow_advert = 1;
 
+  Packet first;
   for (int i = 0; i < 9; i++) {
     uint8_t app[1] = { (uint8_t)(0x30 + i) };
     mesh::Packet* adv = mesh.createAdvert(mesh.self_id, app, sizeof(app));
@@ -966,12 +1009,17 @@ TEST(ShadowAuth, AdvertRateLimitRejectsNinthAdvert) {
 
     Packet p;
     copyRaw(out, &p);
+    if (i == 0) first = p;
     if (i < 8) {
       EXPECT_FALSE(auth.filter(mesh, &p));
     } else {
       EXPECT_TRUE(auth.filter(mesh, &p));   // ninth advert exceeds 8/min
     }
   }
+
+  // The fast-path cache is intentionally checked before the advert rate
+  // limiter: an exact duplicate does not consume another advert slot.
+  EXPECT_FALSE(auth.filter(mesh, &first));
 }
 
 TEST(ShadowAuth, DirectAdvertRequiresValidSignature) {
@@ -1064,6 +1112,590 @@ TEST(Mesh, BaseRepeaterForwardsWrappedAdvert) {
   EXPECT_EQ(p.payload_len, out->payload_len);
   EXPECT_EQ(memcmp(p.payload, out->payload, out->payload_len), 0);
   EXPECT_LE(p.getRawLength(), MAX_TRANS_UNIT);
+}
+
+TEST(ShadowNode, RepeatCompanionForwardsFragments) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode tx(sender.self_id, rng);
+  tx.setEnabled(true);
+  sender.setShadowSendHook(&tx);
+
+  uint8_t payload[180];
+  for (int i = 0; i < (int)sizeof(payload); i++) payload[i] = (uint8_t)(i ^ 0x5A);
+  Packet* inner = sender.createRawData(payload, sizeof(payload));
+  ASSERT_NE(inner, nullptr);
+  inner->header = (uint8_t)((PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD);
+  inner->path_len = 0;
+  sender.sendPacket(inner, 0, 0);
+
+  Packet* f0 = mgr.getNextOutbound(100000);
+  Packet* f1 = mgr.getNextOutbound(100000);
+  ASSERT_NE(f0, nullptr);
+  ASSERT_NE(f1, nullptr);
+
+  SimpleMeshTables rx_tables;
+  ForwardingTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  for (int i = 0; i < PUB_KEY_SIZE; i++) rx.self_id.pub_key[i] = (uint8_t)(0xA0 + i);
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(true);
+  rx_node.setForwardEnvelopes(true);
+  rx.setShadowRecvHook(&rx_node);
+
+  Packet p;
+  copyRaw(f0, &p);
+  p.header = (uint8_t)((p.header & ~PH_ROUTE_MASK) | ROUTE_TYPE_FLOOD);
+  p.path_len = 0;
+  DispatcherAction a0 = rx.recv(&p);
+  EXPECT_NE(a0, ACTION_RELEASE);
+  EXPECT_EQ(p.getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+  EXPECT_EQ(p.payload_len, f0->payload_len);
+  EXPECT_EQ(memcmp(p.payload, f0->payload, f0->payload_len), 0);
+
+  copyRaw(f1, &p);
+  p.header = (uint8_t)((p.header & ~PH_ROUTE_MASK) | ROUTE_TYPE_FLOOD);
+  p.path_len = 0;
+  DispatcherAction a1 = rx.recv(&p);
+  EXPECT_NE(a1, ACTION_RELEASE);
+  EXPECT_EQ(p.getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+  EXPECT_EQ(p.payload_len, f1->payload_len);
+  EXPECT_EQ(memcmp(p.payload, f1->payload, f1->payload_len), 0);
+
+  ASSERT_EQ(mgr.inboundCount(), 1);
+  Packet* local = mgr.getNextInbound(100000);
+  ASSERT_NE(local, nullptr);
+  EXPECT_TRUE(local->local_only);
+  EXPECT_EQ(local->getPayloadType(), PAYLOAD_TYPE_RAW_CUSTOM);
+  EXPECT_EQ(local->payload_len, sizeof(payload));
+  EXPECT_EQ(memcmp(local->payload, payload, sizeof(payload)), 0);
+
+  // Local-only reassembled traffic must never be retransmitted.
+  DispatcherAction local_action = rx.recv(local);
+  EXPECT_EQ(local_action, ACTION_RELEASE);
+  rx.releasePacket(local);
+}
+
+TEST(ShadowNode, RepeatCompanionForwardsFragmentsOutOfOrder) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode tx(sender.self_id, rng);
+  tx.setEnabled(true);
+  sender.setShadowSendHook(&tx);
+
+  uint8_t payload[180];
+  for (int i = 0; i < (int)sizeof(payload); i++) payload[i] = (uint8_t)(i ^ 0xA5);
+  Packet* inner = sender.createRawData(payload, sizeof(payload));
+  ASSERT_NE(inner, nullptr);
+  inner->header = (uint8_t)((PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD);
+  inner->path_len = 0;
+  sender.sendPacket(inner, 0, 0);
+  Packet* f0 = mgr.getNextOutbound(100000);
+  Packet* f1 = mgr.getNextOutbound(100000);
+  ASSERT_NE(f0, nullptr);
+  ASSERT_NE(f1, nullptr);
+
+  SimpleMeshTables rx_tables;
+  ForwardingTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  for (int i = 0; i < PUB_KEY_SIZE; i++) rx.self_id.pub_key[i] = (uint8_t)(0xB0 + i);
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(true);
+  rx_node.setForwardEnvelopes(true);
+  rx.setShadowRecvHook(&rx_node);
+
+  Packet p;
+  copyRaw(f1, &p);
+  p.header = (uint8_t)((p.header & ~PH_ROUTE_MASK) | ROUTE_TYPE_FLOOD);
+  p.path_len = 0;
+  EXPECT_NE(rx.recv(&p), ACTION_RELEASE);
+  EXPECT_EQ(mgr.inboundCount(), 0);
+  EXPECT_EQ(p.payload_len, f1->payload_len);
+  EXPECT_EQ(memcmp(p.payload, f1->payload, f1->payload_len), 0);
+
+  copyRaw(f0, &p);
+  p.header = (uint8_t)((p.header & ~PH_ROUTE_MASK) | ROUTE_TYPE_FLOOD);
+  p.path_len = 0;
+  EXPECT_NE(rx.recv(&p), ACTION_RELEASE);
+  EXPECT_EQ(p.payload_len, f0->payload_len);
+  EXPECT_EQ(memcmp(p.payload, f0->payload, f0->payload_len), 0);
+
+  ASSERT_EQ(mgr.inboundCount(), 1);
+  Packet* local = mgr.getNextInbound(100000);
+  ASSERT_NE(local, nullptr);
+  EXPECT_TRUE(local->local_only);
+  EXPECT_EQ(local->getPayloadType(), PAYLOAD_TYPE_RAW_CUSTOM);
+  EXPECT_EQ(local->payload_len, sizeof(payload));
+  EXPECT_EQ(memcmp(local->payload, payload, sizeof(payload)), 0);
+  rx.releasePacket(local);
+}
+
+TEST(ShadowNode, RepeatCompanionForwardsDuplicateFragment) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode tx(sender.self_id, rng);
+  tx.setEnabled(true);
+  sender.setShadowSendHook(&tx);
+
+  uint8_t payload[180];
+  memset(payload, 0x3C, sizeof(payload));
+  Packet* inner = sender.createRawData(payload, sizeof(payload));
+  ASSERT_NE(inner, nullptr);
+  inner->header = (uint8_t)((PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD);
+  inner->path_len = 0;
+  sender.sendPacket(inner, 0, 0);
+  Packet* f0 = mgr.getNextOutbound(100000);
+  Packet* f1 = mgr.getNextOutbound(100000);
+  ASSERT_NE(f0, nullptr);
+  ASSERT_NE(f1, nullptr);
+
+  SimpleMeshTables rx_tables;
+  ForwardingTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  for (int i = 0; i < PUB_KEY_SIZE; i++) rx.self_id.pub_key[i] = (uint8_t)(0xC0 + i);
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(true);
+  rx_node.setForwardEnvelopes(true);
+
+  Packet p;
+  copyRaw(f0, &p);
+  p.header = (uint8_t)((p.header & ~PH_ROUTE_MASK) | ROUTE_TYPE_FLOOD);
+  p.path_len = 0;
+  EXPECT_FALSE(rx_node.unwrapAndProcess(rx, &p));
+  EXPECT_EQ(p.payload_len, f0->payload_len);
+  EXPECT_EQ(memcmp(p.payload, f0->payload, f0->payload_len), 0);
+  EXPECT_EQ(mgr.inboundCount(), 0);
+
+  // Same fragment again: no local delivery until the set is complete.
+  EXPECT_FALSE(rx_node.unwrapAndProcess(rx, &p));
+  EXPECT_EQ(p.payload_len, f0->payload_len);
+  EXPECT_EQ(mgr.inboundCount(), 0);
+
+  copyRaw(f1, &p);
+  p.header = (uint8_t)((p.header & ~PH_ROUTE_MASK) | ROUTE_TYPE_FLOOD);
+  p.path_len = 0;
+  EXPECT_FALSE(rx_node.unwrapAndProcess(rx, &p));
+  EXPECT_EQ(mgr.inboundCount(), 1);
+
+  Packet* local = mgr.getNextInbound(100000);
+  ASSERT_NE(local, nullptr);
+  EXPECT_TRUE(local->local_only);
+  EXPECT_EQ(local->payload_len, sizeof(payload));
+  EXPECT_EQ(memcmp(local->payload, payload, sizeof(payload)), 0);
+  rx.releasePacket(local);
+}
+
+TEST(ShadowNode, RepeatCompanionForwardsDetachedAdvert) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode tx(sender.self_id, rng);
+  tx.setEnabled(true);
+  sender.setShadowSendHook(&tx);
+
+  Packet* sig = makeWrappedAdvert(sender, mgr, MAX_ADVERT_DATA_SIZE);
+  ASSERT_NE(sig, nullptr);
+  Packet* msg = mgr.getNextOutbound(100000);
+  ASSERT_NE(msg, nullptr);
+
+  SimpleMeshTables rx_tables;
+  ForwardingTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  for (int i = 0; i < PUB_KEY_SIZE; i++) rx.self_id.pub_key[i] = (uint8_t)(0xA0 + i);
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(true);
+  rx_node.setForwardEnvelopes(true);
+  rx.setShadowRecvHook(&rx_node);
+
+  Packet p;
+  copyRaw(sig, &p);
+  p.header = (uint8_t)((p.header & ~PH_ROUTE_MASK) | ROUTE_TYPE_FLOOD);
+  p.path_len = 0;
+  EXPECT_NE(rx.recv(&p), ACTION_RELEASE);
+  EXPECT_EQ(rx.adverts, 0);
+  EXPECT_EQ(p.payload_len, sig->payload_len);
+  EXPECT_EQ(memcmp(p.payload, sig->payload, sig->payload_len), 0);
+
+  copyRaw(msg, &p);
+  p.header = (uint8_t)((p.header & ~PH_ROUTE_MASK) | ROUTE_TYPE_FLOOD);
+  p.path_len = 0;
+  EXPECT_NE(rx.recv(&p), ACTION_RELEASE);
+  EXPECT_EQ(rx.adverts, 1);
+  EXPECT_EQ(p.payload_len, msg->payload_len);
+  EXPECT_EQ(memcmp(p.payload, msg->payload, msg->payload_len), 0);
+}
+
+TEST(ShadowNode, RepeatCompanionForwardsGroupMessage) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode tx(sender.self_id, rng);
+  tx.setEnabled(true);
+  sender.setShadowSendHook(&tx);
+
+  GroupChannel channel;
+  memset(channel.hash, 0, sizeof(channel.hash));
+  channel.hash[0] = 0x42;
+  memset(channel.secret, 0x33, sizeof(channel.secret));
+
+  const uint8_t data[] = { 'h', 'e', 'l', 'l', 'o' };
+  Packet* inner = sender.createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, data, sizeof(data));
+  ASSERT_NE(inner, nullptr);
+  inner->header = (uint8_t)((inner->header & ~PH_ROUTE_MASK) | ROUTE_TYPE_FLOOD);
+  inner->path_len = 0;
+  sender.sendPacket(inner, 0, 0);
+  Packet* out = mgr.getNextOutbound(100000);
+  ASSERT_NE(out, nullptr);
+
+  SimpleMeshTables rx_tables;
+  GroupForwardingTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  rx.channel = channel;
+  for (int i = 0; i < PUB_KEY_SIZE; i++) rx.self_id.pub_key[i] = (uint8_t)(0xA0 + i);
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(true);
+  rx_node.setForwardEnvelopes(true);
+  rx.setShadowRecvHook(&rx_node);
+
+  Packet p;
+  copyRaw(out, &p);
+  p.header = (uint8_t)((p.header & ~PH_ROUTE_MASK) | ROUTE_TYPE_FLOOD);
+  p.path_len = 0;
+  EXPECT_NE(rx.recv(&p), ACTION_RELEASE);
+  EXPECT_EQ(rx.groups, 1);
+  EXPECT_EQ(p.getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+  EXPECT_EQ(p.payload_len, out->payload_len);
+  EXPECT_EQ(memcmp(p.payload, out->payload, out->payload_len), 0);
+}
+
+TEST(Mesh, LocalOnlyPacketIsNotForwarded) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  ForwardingTestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+
+  Packet p;
+  p.header = (uint8_t)((PAYLOAD_TYPE_GRP_TXT << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD);
+  p.path_len = 0;
+  p.payload_len = 3;
+  p.payload[0] = 0x11;
+  p.payload[1] = 0x22;
+  p.payload[2] = 0x33;
+  p.local_only = true;
+
+  EXPECT_EQ(mesh.recv(&p), ACTION_RELEASE);
+}
+
+TEST(Mesh, LocalOnlyDirectPacketIsNotForwarded) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  ForwardingTestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+
+  uint8_t self_hash[PATH_HASH_SIZE];
+  mesh.self_id.copyHashTo(self_hash);
+
+  Packet p;
+  p.header = (uint8_t)((PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT) | ROUTE_TYPE_DIRECT);
+  p.path_len = 1;
+  p.path[0] = self_hash[0];
+  p.payload_len = 1;
+  p.payload[0] = 0x42;
+  p.local_only = true;
+
+  EXPECT_EQ(mesh.recv(&p), ACTION_RELEASE);
+}
+
+TEST(Mesh, LocalOnlyTraceIsNotForwarded) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  ForwardingTestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+
+  uint8_t self_hash[PATH_HASH_SIZE];
+  mesh.self_id.copyHashTo(self_hash);
+
+  Packet p;
+  memset(&p, 0, sizeof(p));
+  p.header = (uint8_t)((PAYLOAD_TYPE_TRACE << PH_TYPE_SHIFT) | ROUTE_TYPE_DIRECT);
+  p.path_len = 0;
+  p.payload_len = 10;
+  p.payload[8] = 0;          // path hash size = 1
+  p.payload[9] = self_hash[0];
+  p.local_only = true;
+
+  EXPECT_EQ(mesh.recv(&p), ACTION_RELEASE);
+}
+
+TEST(Mesh, ScopedShadowAdvertMatchesRegionMap) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+  mesh.setShadowSendHook(&node);
+
+  TransportKeyStore key_store;
+  RegionMap map(key_store);
+  RegionEntry* region_a = map.putRegion("alpha", 0);
+  RegionEntry* region_b = map.putRegion("bravo", 0);
+  ASSERT_NE(region_a, nullptr);
+  ASSERT_NE(region_b, nullptr);
+  region_a->flags = 0;
+  region_b->flags = 0;
+
+  TransportKey keys_a[1], keys_b[1];
+  ASSERT_EQ(map.getTransportKeysFor(*region_a, keys_a, 1), 1);
+  ASSERT_EQ(map.getTransportKeysFor(*region_b, keys_b, 1), 1);
+
+  Packet* out_a = makeScopedAdvert(mesh, mgr, node, keys_a[0], 0);
+  Packet* out_b = makeScopedAdvert(mesh, mgr, node, keys_b[0], 0);
+  ASSERT_NE(out_a, nullptr);
+  ASSERT_NE(out_b, nullptr);
+  EXPECT_EQ(map.findMatch(out_a, REGION_DENY_FLOOD), region_a);
+  EXPECT_EQ(map.findMatch(out_b, REGION_DENY_FLOOD), region_b);
+
+  // A region that denies flood must not match even with a valid code.
+  region_a->flags = REGION_DENY_FLOOD;
+  EXPECT_EQ(map.findMatch(out_a, REGION_DENY_FLOOD), nullptr);
+  EXPECT_EQ(map.findMatch(out_b, REGION_DENY_FLOOD), region_b);
+
+  // Zero transport code selects the wildcard region.
+  Packet wildcard_packet;
+  memset(&wildcard_packet, 0, sizeof(wildcard_packet));
+  wildcard_packet.transport_codes[0] = 0;
+  EXPECT_EQ(map.findMatch(&wildcard_packet, REGION_DENY_FLOOD), &map.getWildcard());
+
+  // Corrupted transport code must not match either region.
+  Packet bad;
+  copyRaw(out_a, &bad);
+  bad.transport_codes[0] = (uint16_t)(bad.transport_codes[0] + 1);
+  EXPECT_EQ(map.findMatch(&bad, REGION_DENY_FLOOD), nullptr);
+}
+
+TEST(ShadowAuth, SigCacheEvictionPicksOldest) {
+  ShadowSigEntry entries[4];
+  memset(entries, 0, sizeof(entries));
+  for (int i = 0; i < 4; i++) {
+    entries[i].used = true;
+    entries[i].expiry_ms = (unsigned long)(30 - i * 10);   // 30, 20, 10, 0
+  }
+  EXPECT_EQ(ShadowAuth::oldestSigSlot(entries, 4), 3);
+
+  entries[3].expiry_ms = 100;   // slot 0 is oldest again? 30,20,10,100 -> index 2
+  EXPECT_EQ(ShadowAuth::oldestSigSlot(entries, 4), 2);
+
+  entries[1].used = false;
+  EXPECT_EQ(ShadowAuth::oldestSigSlot(entries, 4), 1);
+
+  memset(entries, 0, sizeof(entries));
+  EXPECT_EQ(ShadowAuth::oldestSigSlot(entries, 4), 0);
+}
+
+TEST(ShadowAuth, FragmentAdvertFromUnknownDropped) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+
+  ShadowAuth auth;
+  auth.begin();
+  auth.getPrefs().enabled = 1;
+  auth.getPrefs().enforce = 1;
+  auth.getPrefs().allow_advert = 1;
+
+  Packet p;
+  memset(&p, 0, sizeof(p));
+  p.header = (uint8_t)((PAYLOAD_TYPE_GRP_TXT << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD);
+  p.path_len = 0;
+  p.payload_len = SHADOW_FRAG_OVERHEAD + 4;
+  uint8_t tag[SHADOW_TAG_SIZE] = { 0xAA, 0xBB };
+  shadow::writeCommon(p.payload, tag, SHADOW_MODE_FRAGMENT);
+
+  EXPECT_TRUE(auth.filter(mesh, &p));
+}
+
+TEST(ShadowNode, RepeaterForwardsFragmentsUnchanged) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode tx(sender.self_id, rng);
+  tx.setEnabled(true);
+  sender.setShadowSendHook(&tx);
+
+  uint8_t payload[180];
+  memset(payload, 0x44, sizeof(payload));
+  Packet* inner = sender.createRawData(payload, sizeof(payload));
+  ASSERT_NE(inner, nullptr);
+  inner->header = (uint8_t)((PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD);
+  inner->path_len = 0;
+  sender.sendPacket(inner, 0, 0);
+  Packet* f0 = mgr.getNextOutbound(100000);
+  Packet* f1 = mgr.getNextOutbound(100000);
+  ASSERT_NE(f0, nullptr);
+  ASSERT_NE(f1, nullptr);
+
+  ShadowNode rx(sender.self_id, rng);
+  rx.setEnabled(true);
+  rx.setUnwrapAll(false);   // simple repeater
+
+  Packet p;
+  copyRaw(f0, &p);
+  EXPECT_FALSE(rx.unwrapAndProcess(sender, &p));
+  EXPECT_EQ(p.payload_len, f0->payload_len);
+  EXPECT_EQ(memcmp(p.payload, f0->payload, f0->payload_len), 0);
+
+  copyRaw(f1, &p);
+  EXPECT_FALSE(rx.unwrapAndProcess(sender, &p));
+  EXPECT_EQ(p.payload_len, f1->payload_len);
+  EXPECT_EQ(memcmp(p.payload, f1->payload, f1->payload_len), 0);
+}
+
+TEST(ShadowNode, PathHashSizesPreserved) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+  mesh.setShadowSendHook(&node);
+
+  TransportKey key;
+  for (int i = 0; i < (int)sizeof(key.key); i++) key.key[i] = (uint8_t)(0x60 + i);
+
+  ShadowAuth auth;
+  auth.begin();
+  auth.getPrefs().enabled = 1;
+  auth.getPrefs().enforce = 1;
+  auth.getPrefs().allow_advert = 1;
+  ASSERT_TRUE(auth.allow(mesh.self_id.pub_key));
+
+  for (uint8_t size = 1; size <= 3; size++) {
+    Packet* out = makeScopedAdvert(mesh, mgr, node, key, 0, size);
+    ASSERT_NE(out, nullptr) << "size=" << (int)size;
+    EXPECT_EQ(out->getPathHashSize(), size);
+    EXPECT_EQ(out->getPathHashCount(), 0);
+    EXPECT_EQ(key.calcTransportCode(out), out->transport_codes[0]);
+
+    Packet parsed;
+    copyRaw(out, &parsed);
+    EXPECT_FALSE(auth.filter(mesh, &parsed)) << "size=" << (int)size;
+    EXPECT_TRUE(parsed.auth_ok);
+
+    // Detached advert: ensure both packets preserve the configured path size.
+    Packet* sig = makeScopedAdvert(mesh, mgr, node, key, MAX_ADVERT_DATA_SIZE, size);
+    ASSERT_NE(sig, nullptr);
+    Packet* msg = mgr.getNextOutbound(100000);
+    ASSERT_NE(msg, nullptr);
+    EXPECT_EQ(sig->getPathHashSize(), size);
+    EXPECT_EQ(msg->getPathHashSize(), size);
+    EXPECT_EQ(key.calcTransportCode(sig), sig->transport_codes[0]);
+    EXPECT_EQ(key.calcTransportCode(msg), msg->transport_codes[0]);
+  }
+}
+
+TEST(ShadowAuth, PathModeTamperDropped) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+  mesh.setShadowSendHook(&node);
+
+  const uint8_t payload[] = "path-mode";
+  Packet* out = wrapOne(mesh, mgr, payload, sizeof(payload));
+  ASSERT_NE(out, nullptr);
+
+  ShadowAuth auth;
+  auth.begin();
+  auth.getPrefs().enabled = 1;
+  auth.getPrefs().enforce = 1;
+  ASSERT_TRUE(auth.allow(mesh.self_id.pub_key));
+
+  Packet p;
+  copyRaw(out, &p);
+  p.path_len = (uint8_t)((p.path_len & 0x3F) | (1 << 6));   // change 1-byte -> 2-byte hash size
+  EXPECT_TRUE(auth.filter(mesh, &p));
+
+  auth.getPrefs().enforce = 0;
+  Packet q;
+  copyRaw(out, &q);
+  q.path_len = (uint8_t)((q.path_len & 0x3F) | (1 << 6));
+  EXPECT_FALSE(auth.filter(mesh, &q));   // transitional mode: count, then forward
+  EXPECT_FALSE(q.auth_ok);
+}
+
+TEST(ShadowAuth, PathBytesMutationStillAccepted) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+  mesh.setShadowSendHook(&node);
+
+  const uint8_t payload[] = "path-bytes";
+  Packet* out = wrapOne(mesh, mgr, payload, sizeof(payload));
+  ASSERT_NE(out, nullptr);
+
+  ShadowAuth auth;
+  auth.begin();
+  auth.getPrefs().enabled = 1;
+  auth.getPrefs().enforce = 1;
+  ASSERT_TRUE(auth.allow(mesh.self_id.pub_key));
+
+  Packet p;
+  copyRaw(out, &p);
+  p.path_len = 1;                 // one path hash, same 1-byte hash size
+  p.path[0] = 0x5A;               // path bytes are not part of the signature
+  EXPECT_FALSE(auth.filter(mesh, &p));
+  EXPECT_TRUE(p.auth_ok);
+}
+
+TEST(Mesh, ForwardingPreservesPathHashSize) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(sender.self_id, rng);
+  node.setEnabled(true);
+  sender.setShadowSendHook(&node);
+
+  TransportKey key;
+  for (int i = 0; i < (int)sizeof(key.key); i++) key.key[i] = (uint8_t)(0x90 + i);
+
+  const uint8_t payload[] = { 'p', 'a', 't', 'h' };
+  for (uint8_t size = 1; size <= 3; size++) {
+    Packet* out = makeScopedRaw(sender, mgr, node, key, size, payload, sizeof(payload));
+    ASSERT_NE(out, nullptr) << "size=" << (int)size;
+
+    SimpleMeshTables base_tables;
+    ForwardingTestMesh base(radio, clock, rng, rtc, mgr, base_tables);
+    Packet p;
+    copyRaw(out, &p);
+    EXPECT_NE(base.recv(&p), ACTION_RELEASE) << "size=" << (int)size;
+    EXPECT_EQ(p.getPathHashSize(), size);
+    EXPECT_EQ(p.getPathHashCount(), 1);
+    EXPECT_EQ(p.path_len >> 6, (uint8_t)(size - 1));
+
+    ShadowAuth auth;
+    auth.begin();
+    auth.getPrefs().enabled = 1;
+    auth.getPrefs().enforce = 1;
+    ASSERT_TRUE(auth.allow(sender.self_id.pub_key));
+    EXPECT_FALSE(auth.filter(sender, &p)) << "size=" << (int)size;
+    EXPECT_TRUE(p.auth_ok);
+  }
+}
+
+TEST(ShadowAuth, AdvertPathModeMutationStillAccepted) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+  mesh.setShadowSendHook(&node);
+
+  TransportKey key;
+  for (int i = 0; i < (int)sizeof(key.key); i++) key.key[i] = (uint8_t)(0xA0 + i);
+  Packet* out = makeScopedAdvert(mesh, mgr, node, key, 0, 1);
+  ASSERT_NE(out, nullptr);
+
+  ShadowAuth auth;
+  auth.begin();
+  auth.getPrefs().enabled = 1;
+  auth.getPrefs().enforce = 1;
+  auth.getPrefs().allow_advert = 1;
+  ASSERT_TRUE(auth.allow(mesh.self_id.pub_key));
+
+  Packet p;
+  copyRaw(out, &p);
+  p.path_len = (uint8_t)((p.path_len & 0x3F) | (1 << 6));   // 1-byte -> 2-byte hash size
+
+  // Wrapped adverts are authenticated by the inner advert signature only; the
+  // outer shadow signature (and therefore path mode) is not checked.
+  EXPECT_FALSE(auth.filter(mesh, &p));
+  EXPECT_TRUE(p.auth_ok);
 }
 
 int main(int argc, char** argv) {

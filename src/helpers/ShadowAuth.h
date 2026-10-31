@@ -174,6 +174,13 @@ public:
   int  getNumAllowed() const;
   const uint8_t* getAllowedKey(int idx) const;
 
+  /**
+   * \brief  Choose the cache slot to overwrite. Exposed for unit testing.
+   *         Returns the first free slot, otherwise the entry with the earliest
+   *         expiry. Returns 0 for an empty/invalid table.
+   */
+  static int oldestSigSlot(const ShadowSigEntry* entries, int count);
+
   void formatStatus(char* reply, size_t reply_len) const;
   bool handleCommand(mesh::Mesh& mesh, const char* command, char* reply, size_t reply_len);
 };

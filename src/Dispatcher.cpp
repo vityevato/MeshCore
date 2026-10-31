@@ -162,6 +162,7 @@ bool Dispatcher::tryParsePacket(Packet* pkt, const uint8_t* raw, int len) {
   pkt->shadow_wrapped = false;
   pkt->auth_ok = false;
   pkt->recv_filtered = false;
+  pkt->local_only = false;
   pkt->shadow_flags = 0;
 
   pkt->header = raw[i++];
@@ -385,6 +386,7 @@ Packet* Dispatcher::obtainNewPacket() {
     pkt->shadow_wrapped = false;
     pkt->auth_ok = false;
     pkt->recv_filtered = false;
+    pkt->local_only = false;
     pkt->shadow_flags = 0;
   }
   return pkt;

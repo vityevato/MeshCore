@@ -463,6 +463,28 @@ bool ShadowNode::unwrapAndProcess(mesh::Mesh& mesh, mesh::Packet* packet) {
     uint8_t inner_type = packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 2];
     uint16_t frag_len = packet->payload_len - SHADOW_FRAG_OVERHEAD;
     const uint8_t* frag_payload = &packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 3];
+
+    if (_forward_envelopes) {
+      // Repeater-capable endpoint: keep and forward the original signed
+      // fragment, while reassembling a copy for local delivery. The
+      // reassembled packet is marked local_only so Mesh never retransmits
+      // the inner payload as ordinary traffic.
+      saveEnvelope(packet);
+      bool consumed = processFragment(mesh, packet, tag, inner_type, frag_payload, frag_len, now_ms);
+      if (!consumed) {
+        mesh::Packet* local = mesh.obtainNewPacket();
+        if (local != NULL) {
+          *local = *packet;
+          local->local_only = true;
+          mesh.queueInboundPacket(local, 0);
+        } else {
+          _dropped++;
+        }
+      }
+      prepareForward(packet);
+      return false;   // forward this fragment unchanged
+    }
+
     return processFragment(mesh, packet, tag, inner_type, frag_payload, frag_len, now_ms);
   }
 

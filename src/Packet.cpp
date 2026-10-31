@@ -13,6 +13,7 @@ Packet::Packet() {
   shadow_wrapped = false;
   auth_ok = false;
   recv_filtered = false;
+  local_only = false;
   shadow_flags = 0;
 }
 
@@ -73,6 +74,7 @@ bool Packet::readFrom(const uint8_t src[], uint8_t len) {
   shadow_wrapped = false;
   auth_ok = false;
   recv_filtered = false;
+  local_only = false;
   shadow_flags = 0;
 
   uint8_t i = 0;
