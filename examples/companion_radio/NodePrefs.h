@@ -48,6 +48,9 @@ public:
   char default_scope_name[31];
   uint8_t default_scope_key[16];
   int8_t tz_offset = 0;
+  // Shadow transit auth (shd.*)
+  uint8_t shd_enabled = 1;
+  uint8_t shd_mode = 0;       // persisted: 0 auto, 1 embedded, 2 detached, 3 fragment
 #ifdef ENABLE_WIFI_INTERFACE
   #ifndef WIFI_SSID
     #define WIFI_SSID ""
@@ -166,6 +169,8 @@ private:
       def("tel_loc", _parent->telemetry_mode_loc);
       def("tel_env", _parent->telemetry_mode_env);
       def("tz_offset", _parent->tz_offset);
+      def("shd.enabled", _parent->shd_enabled);
+      def("shd.mode", _parent->shd_mode);
     }
   public:
     CompanionPrefs(NodePrefs* parent) : _parent(parent) { }

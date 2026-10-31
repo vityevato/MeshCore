@@ -24,12 +24,29 @@ public:
     }
   }
 
-  void finalize(uint8_t* hash, size_t hashLen) {
+  void finalize(void* hash, size_t hashLen) {
+    uint8_t* out = static_cast<uint8_t*>(hash);
     for (size_t i = 0; i < hashLen; i++) {
-      hash[i] = _state[i % 32];
+      out[i] = _state[i % 32];
     }
   }
 
-  void resetHMAC(const uint8_t* key, size_t keyLen) {}
-  void finalizeHMAC(const uint8_t* key, size_t keyLen, uint8_t* hash, size_t hashLen) {}
+  void resetHMAC(const void* key, size_t keyLen) {
+    (void)key;
+    (void)keyLen;
+    memset(_state, 0, sizeof(_state));
+    _len = 0;
+  }
+
+  // Deterministic, non-cryptographic stand-in that still depends on both the
+  // HMAC key and the accumulated data, so ordering bugs in transport-code
+  // calculation are observable in native tests.
+  void finalizeHMAC(const void* key, size_t keyLen, void* hash, size_t hashLen) {
+    const uint8_t* k = static_cast<const uint8_t*>(key);
+    uint8_t* out = static_cast<uint8_t*>(hash);
+    for (size_t i = 0; i < hashLen; i++) {
+      uint8_t kv = keyLen ? k[i % keyLen] : 0;
+      out[i] = (uint8_t)(_state[i % 32] ^ kv ^ (uint8_t)((_len + i) * 31));
+    }
+  }
 };

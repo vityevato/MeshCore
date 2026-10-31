@@ -50,6 +50,13 @@ public:
   uint8_t payload[MAX_PACKET_PAYLOAD];
   int8_t _snr;
 
+  // Shadow transit auth metadata. Never serialized; reset for every new packet.
+  bool    shadow;          // packet currently carries a shadow envelope
+  bool    shadow_wrapped;  // locally built shadow packet: do not wrap again
+  bool    auth_ok;         // source was verified (or explicitly allowed) by a repeater
+  bool    recv_filtered;   // early shadow/transit filter has already seen this packet
+  uint8_t shadow_flags;    // envelope flags (version + mode)
+
   /**
    * \brief calculate the hash of payload + type
    * \param  dest_hash   destination to store the hash (must be MAX_HASH_SIZE bytes)

@@ -1,0 +1,604 @@
+#include "ShadowNode.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <SHA256.h>
+
+ShadowNode::ShadowNode(mesh::LocalIdentity& self, mesh::RNG& rng)
+  : _self(self), _rng(rng), _enabled(true), _mode(SHADOW_MODE_AUTO), _unwrap_all(true),
+    _forward_envelopes(false), _sig_id(0), _frag_id(0), _frag_ttl_ms(SHADOW_FRAG_TTL_DEFAULT_MS),
+    _scope_valid(false), _saved_valid(false), _saved_header(0), _saved_payload_len(0),
+    _saved_flags(0), _saved_auth_ok(false),
+    _sent(0), _recv(0), _frags_recv(0), _dropped(0) {
+  memset(_scope_key, 0, sizeof(_scope_key));
+  memset(_frags, 0, sizeof(_frags));
+  memset(_saved_transport_codes, 0, sizeof(_saved_transport_codes));
+  memset(_saved_payload, 0, sizeof(_saved_payload));
+  _rng.random((uint8_t*)&_sig_id, sizeof(_sig_id));
+  _rng.random((uint8_t*)&_frag_id, sizeof(_frag_id));
+}
+
+void ShadowNode::setMode(uint8_t mode) {
+  if (mode > SHADOW_MODE_FRAGMENT || mode == SHADOW_MODE_SIGNATURE) mode = SHADOW_MODE_AUTO;
+  _mode = mode;
+}
+
+void ShadowNode::setTransportKey(const uint8_t* key) {
+  if (key == NULL) {
+    _scope_valid = false;
+    memset(_scope_key, 0, sizeof(_scope_key));
+    return;
+  }
+  memcpy(_scope_key, key, sizeof(_scope_key));
+  _scope_valid = true;
+  for (int i = 0; i < (int)sizeof(_scope_key); i++) {
+    if (_scope_key[i] != 0) return;
+  }
+  _scope_valid = false;   // all-zero key means unscoped
+}
+
+uint16_t ShadowNode::calcOuterCode(const mesh::Packet* out) const {
+  uint16_t code = 0;
+  SHA256 sha;
+  sha.resetHMAC(_scope_key, sizeof(_scope_key));
+  uint8_t type = out->getPayloadType();
+  sha.update(&type, 1);
+  sha.update(out->payload, out->payload_len);
+  sha.finalizeHMAC(_scope_key, sizeof(_scope_key), (uint8_t*)&code, 2);
+  if (code == 0) code = 1;
+  else if (code == 0xFFFF) code = 0xFFFE;
+  return code;
+}
+
+void ShadowNode::nextSigId(uint8_t* dest) {
+  if (++_sig_id == 0) _sig_id = 1;
+  memcpy(dest, &_sig_id, SHADOW_SIG_ID_SIZE);
+}
+
+void ShadowNode::nextFragId(uint8_t* dest) {
+  if (++_frag_id == 0) _frag_id = 1;
+  memcpy(dest, &_frag_id, SHADOW_SIG_ID_SIZE);
+}
+
+bool ShadowNode::shouldWrap(const mesh::Packet* packet) const {
+  if (packet->shadow_wrapped) return false;
+  uint8_t type = packet->getPayloadType();
+  // These are the login exception (ANON_REQ) or have local zero-hop
+  // semantics (CONTROL / TRACE). ADVERT is wrapped: the inner advert keeps
+  // its own Ed25519 signature and is verified by Mesh after unwrapping.
+  if (type == PAYLOAD_TYPE_ANON_REQ
+      || type == PAYLOAD_TYPE_CONTROL || type == PAYLOAD_TYPE_TRACE) {
+    return false;
+  }
+  return packet->payload_len <= MAX_PACKET_PAYLOAD;
+}
+
+void ShadowNode::prepareOuter(mesh::Packet* out, const mesh::Packet* inner, uint8_t mode) {
+  out->header = (uint8_t)((PAYLOAD_TYPE_GRP_TXT << PH_TYPE_SHIFT) | (inner->header & PH_ROUTE_MASK));
+  out->path_len = inner->path_len;
+  memcpy(out->path, inner->path, inner->getPathByteLen());
+  out->transport_codes[0] = inner->transport_codes[0];
+  out->transport_codes[1] = inner->transport_codes[1];
+  out->shadow = true;
+  out->shadow_wrapped = true;
+  out->auth_ok = true;
+  out->shadow_flags = shadow::makeFlags(mode);
+}
+
+void ShadowNode::sendShadow(mesh::Mesh& mesh, mesh::Packet* out, uint8_t priority, uint32_t delay_millis) {
+  mesh.packetTables()->markSeen(out);   // ignore our own transmission if it loops back
+  mesh.sendPacketRaw(out, priority, delay_millis);
+  _sent++;
+}
+
+bool ShadowNode::wrapEmbedded(mesh::Mesh& mesh, mesh::Packet* packet,
+                              uint8_t priority, uint32_t delay_millis) {
+  uint16_t inner_len = packet->payload_len;
+  if (inner_len > SHADOW_MAX_INNER_EMBEDDED) return false;
+
+  mesh::Packet* out = mesh.obtainNewPacket();
+  if (out == NULL) return false;
+
+  prepareOuter(out, packet, SHADOW_MODE_EMBEDDED);
+  uint8_t tag[SHADOW_TAG_SIZE];
+  shadow::tagOf(_self.pub_key, tag);
+  shadow::writeCommon(out->payload, tag, SHADOW_MODE_EMBEDDED);
+
+  uint16_t n = SHADOW_COMMON_SIZE;
+  out->payload[n++] = packet->getPayloadType();
+  memcpy(&out->payload[n], packet->payload, inner_len); n += inner_len;
+  uint8_t* signature = &out->payload[n];
+  out->payload_len = n + SIGNATURE_SIZE;
+
+  uint8_t digest[SHADOW_DIGEST_SIZE];
+  if (!shadow::digestEmbedded(digest, out->header, shadow::pathModeOf(out),
+                              out->payload, out->payload_len)) {
+    mesh.releasePacket(out);
+    return false;
+  }
+  _self.sign(signature, digest, SHADOW_DIGEST_SIZE);
+
+  // Must be computed over the final packet, including the signature: legacy
+  // region-aware repeaters calculate the same code from the wire payload.
+  if (_scope_valid && packet->hasTransportCodes()) {
+    out->transport_codes[0] = calcOuterCode(out);
+  }
+  sendShadow(mesh, out, priority, delay_millis);
+  return true;
+}
+
+bool ShadowNode::wrapDetached(mesh::Mesh& mesh, mesh::Packet* packet,
+                              uint8_t priority, uint32_t delay_millis) {
+  uint16_t inner_len = packet->payload_len;
+  if (inner_len > SHADOW_MAX_INNER_MSG) return false;
+
+  mesh::Packet* msg = mesh.obtainNewPacket();
+  if (msg == NULL) return false;
+  mesh::Packet* sig = mesh.obtainNewPacket();
+  if (sig == NULL) {
+    mesh.releasePacket(msg);
+    return false;
+  }
+
+  uint8_t tag[SHADOW_TAG_SIZE];
+  shadow::tagOf(_self.pub_key, tag);
+  uint8_t sig_id[SHADOW_SIG_ID_SIZE];
+  nextSigId(sig_id);
+
+  // Message packet (unsigned).
+  prepareOuter(msg, packet, SHADOW_MODE_MESSAGE);
+  shadow::writeCommon(msg->payload, tag, SHADOW_MODE_MESSAGE);
+  memcpy(&msg->payload[SHADOW_COMMON_SIZE], sig_id, SHADOW_SIG_ID_SIZE);
+  uint16_t n = SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE;
+  msg->payload[n++] = packet->getPayloadType();
+  memcpy(&msg->payload[n], packet->payload, inner_len); n += inner_len;
+  msg->payload_len = n;
+
+  if (_scope_valid && packet->hasTransportCodes()) {
+    msg->transport_codes[0] = calcOuterCode(msg);
+  }
+  uint8_t msg_digest[SHADOW_DIGEST_SIZE];
+  if (!shadow::digestMessage(msg_digest, msg->header, shadow::pathModeOf(msg),
+                             msg->payload, msg->payload_len)) {
+    mesh.releasePacket(msg);
+    mesh.releasePacket(sig);
+    return false;
+  }
+
+  // Signature packet.
+  prepareOuter(sig, packet, SHADOW_MODE_SIGNATURE);
+  shadow::writeCommon(sig->payload, tag, SHADOW_MODE_SIGNATURE);
+  memcpy(&sig->payload[SHADOW_COMMON_SIZE], sig_id, SHADOW_SIG_ID_SIZE);
+  memcpy(&sig->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE],
+         msg_digest, SHADOW_MSG_HASH_SIZE);
+  sig->payload_len = SHADOW_SIG_PACKET_SIZE;
+  uint8_t* signature = &sig->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + SHADOW_MSG_HASH_SIZE];
+
+  uint8_t sig_digest[SHADOW_DIGEST_SIZE];
+  if (!shadow::digestSignature(sig_digest, sig->header, shadow::pathModeOf(sig),
+                               sig->payload, sig->payload_len)) {
+    mesh.releasePacket(msg);
+    mesh.releasePacket(sig);
+    return false;
+  }
+  _self.sign(signature, sig_digest, SHADOW_DIGEST_SIZE);
+
+  // Outer transport code must match the final wire packet (see wrapEmbedded).
+  if (_scope_valid && packet->hasTransportCodes()) {
+    sig->transport_codes[0] = calcOuterCode(sig);
+  }
+
+  sendShadow(mesh, sig, priority, delay_millis);
+  sendShadow(mesh, msg, priority, delay_millis + SHADOW_SIG_MSG_DELAY_MS);
+  return true;
+}
+
+bool ShadowNode::wrapFragment(mesh::Mesh& mesh, mesh::Packet* packet,
+                              uint8_t priority, uint32_t delay_millis) {
+  uint16_t inner_len = packet->payload_len;
+  uint8_t count = (uint8_t)((inner_len + SHADOW_MAX_FRAG_PAYLOAD - 1) / SHADOW_MAX_FRAG_PAYLOAD);
+  if (count == 0) count = 1;
+  if (count > SHADOW_MAX_FRAGMENTS) return false;
+
+  uint8_t tag[SHADOW_TAG_SIZE];
+  shadow::tagOf(_self.pub_key, tag);
+  uint8_t frag_id[SHADOW_SIG_ID_SIZE];
+  nextFragId(frag_id);
+
+  for (uint8_t i = 0; i < count; i++) {
+    uint16_t offset = (uint16_t)i * SHADOW_MAX_FRAG_PAYLOAD;
+    uint16_t chunk = inner_len - offset;
+    if (chunk > SHADOW_MAX_FRAG_PAYLOAD) chunk = SHADOW_MAX_FRAG_PAYLOAD;
+
+    mesh::Packet* out = mesh.obtainNewPacket();
+    if (out == NULL) return false;   // receiver will time out the partial set
+
+    prepareOuter(out, packet, SHADOW_MODE_FRAGMENT);
+    shadow::writeCommon(out->payload, tag, SHADOW_MODE_FRAGMENT);
+    memcpy(&out->payload[SHADOW_COMMON_SIZE], frag_id, SHADOW_SIG_ID_SIZE);
+    uint16_t n = SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE;
+    out->payload[n++] = i;
+    out->payload[n++] = count;
+    out->payload[n++] = packet->getPayloadType();
+    memcpy(&out->payload[n], &packet->payload[offset], chunk); n += chunk;
+    uint8_t* signature = &out->payload[n];
+    out->payload_len = n + SIGNATURE_SIZE;
+
+    uint8_t digest[SHADOW_DIGEST_SIZE];
+    if (!shadow::digestFragment(digest, out->header, shadow::pathModeOf(out),
+                                out->payload, out->payload_len)) {
+      mesh.releasePacket(out);
+      return false;
+    }
+    _self.sign(signature, digest, SHADOW_DIGEST_SIZE);
+
+    if (_scope_valid && packet->hasTransportCodes()) {
+      out->transport_codes[0] = calcOuterCode(out);
+    }
+    sendShadow(mesh, out, priority, delay_millis + (uint32_t)i * SHADOW_FRAG_GAP_MS);
+  }
+  return true;
+}
+
+bool ShadowNode::wrapAndSend(mesh::Mesh& mesh, mesh::Packet* packet,
+                             uint8_t priority, uint32_t delay_millis) {
+  if (!_enabled || !shouldWrap(packet)) return false;
+
+  uint16_t inner_len = packet->payload_len;
+  uint8_t mode;
+
+  // Adverts are self-authenticating (their own Ed25519 signature lives in the
+  // inner payload). Never fragment them: embedded or detached only, so any
+  // repeater can apply shd.allow.advert without reassembly.
+  if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT) {
+    mode = (inner_len <= SHADOW_MAX_INNER_EMBEDDED) ? SHADOW_MODE_EMBEDDED
+                                                    : SHADOW_MODE_MESSAGE;
+  } else if (_mode == SHADOW_MODE_EMBEDDED && inner_len <= SHADOW_MAX_INNER_EMBEDDED) {
+    mode = SHADOW_MODE_EMBEDDED;
+  } else if (_mode == SHADOW_MODE_MESSAGE && inner_len <= SHADOW_MAX_INNER_MSG) {
+    mode = SHADOW_MODE_MESSAGE;
+  } else if (_mode == SHADOW_MODE_FRAGMENT) {
+    mode = SHADOW_MODE_FRAGMENT;
+  } else if (inner_len <= SHADOW_MAX_INNER_EMBEDDED) {
+    mode = SHADOW_MODE_EMBEDDED;
+  } else if (inner_len <= SHADOW_MAX_INNER_MSG) {
+    mode = SHADOW_MODE_MESSAGE;
+  } else {
+    mode = SHADOW_MODE_FRAGMENT;
+  }
+
+  bool ok;
+  if (mode == SHADOW_MODE_EMBEDDED) {
+    ok = wrapEmbedded(mesh, packet, priority, delay_millis);
+  } else if (mode == SHADOW_MODE_MESSAGE) {
+    ok = wrapDetached(mesh, packet, priority, delay_millis);
+  } else {
+    ok = wrapFragment(mesh, packet, priority, delay_millis);
+  }
+
+  mesh.releasePacket(packet);   // original is never transmitted
+  if (!ok) _dropped++;
+  return true;                  // consumed either way (fail-closed)
+}
+
+void ShadowNode::saveEnvelope(const mesh::Packet* packet) {
+  _saved_header = packet->header;
+  _saved_payload_len = packet->payload_len;
+  memcpy(_saved_payload, packet->payload, packet->payload_len);
+  _saved_transport_codes[0] = packet->transport_codes[0];
+  _saved_transport_codes[1] = packet->transport_codes[1];
+  _saved_flags = packet->shadow_flags;
+  _saved_auth_ok = packet->auth_ok;
+  _saved_valid = true;
+}
+
+void ShadowNode::prepareForward(mesh::Packet* packet) {
+  if (!_saved_valid) return;
+
+  // Restore only the wire fields of the envelope. packet->path/path_len keep
+  // the value Mesh::routeRecvPacket() produced for the retransmission; the
+  // shadow signature does not cover path bytes.
+  packet->header = _saved_header;
+  packet->payload_len = _saved_payload_len;
+  memcpy(packet->payload, _saved_payload, _saved_payload_len);
+  packet->transport_codes[0] = _saved_transport_codes[0];
+  packet->transport_codes[1] = _saved_transport_codes[1];
+  packet->shadow = true;
+  packet->shadow_wrapped = true;
+  packet->shadow_flags = _saved_flags;
+  packet->auth_ok = _saved_auth_ok;
+  _saved_valid = false;
+}
+
+bool ShadowNode::unwrapLocal(mesh::Packet* packet, uint8_t inner_type,
+                             const uint8_t* inner, uint16_t inner_len) {
+  if (inner_len > MAX_PACKET_PAYLOAD) return false;
+  memmove(packet->payload, inner, inner_len);
+  packet->payload_len = inner_len;
+  packet->header = (uint8_t)((inner_type << PH_TYPE_SHIFT) | (packet->header & PH_ROUTE_MASK));
+  packet->shadow = false;
+  packet->shadow_wrapped = false;
+  packet->auth_ok = false;
+  packet->shadow_flags = 0;
+  _recv++;
+  return false;
+}
+
+int ShadowNode::findFrag(const uint8_t* tag, const uint8_t* frag_id) {
+  for (int i = 0; i < SHADOW_FRAG_MAX; i++) {
+    FragEntry& e = _frags[i];
+    if (e.used && memcmp(e.tag, tag, SHADOW_TAG_SIZE) == 0
+        && memcmp(e.frag_id, frag_id, SHADOW_SIG_ID_SIZE) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+int ShadowNode::allocFrag(unsigned long now_ms) {
+  for (int i = 0; i < SHADOW_FRAG_MAX; i++) {
+    if (!_frags[i].used) return i;
+  }
+  int oldest = 0;
+  for (int i = 1; i < SHADOW_FRAG_MAX; i++) {
+    if ((long)(_frags[i].last_ms - _frags[oldest].last_ms) < 0) oldest = i;
+  }
+  (void)now_ms;
+  memset(&_frags[oldest], 0, sizeof(_frags[oldest]));
+  return oldest;
+}
+
+bool ShadowNode::processFragment(mesh::Mesh& mesh, mesh::Packet* packet, const uint8_t* tag,
+                                 uint8_t inner_type, const uint8_t* frag_payload, uint16_t frag_len,
+                                 unsigned long now_ms) {
+  (void)mesh;
+  const uint8_t* frag_id = &packet->payload[SHADOW_COMMON_SIZE];
+  uint8_t index = packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE];
+  uint8_t count = packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 1];
+
+  if (count == 0 || count > SHADOW_MAX_FRAGMENTS || index >= count) {
+    _dropped++;
+    return true;
+  }
+  if (frag_len > SHADOW_MAX_FRAG_PAYLOAD) {
+    _dropped++;
+    return true;
+  }
+  if (index < count - 1 && frag_len != SHADOW_MAX_FRAG_PAYLOAD) {
+    _dropped++;
+    return true;
+  }
+
+  int slot = findFrag(tag, frag_id);
+  if (slot < 0) {
+    slot = allocFrag(now_ms);
+    FragEntry& e = _frags[slot];
+    memset(&e, 0, sizeof(e));
+    e.used = true;
+    memcpy(e.tag, tag, SHADOW_TAG_SIZE);
+    memcpy(e.frag_id, frag_id, SHADOW_SIG_ID_SIZE);
+    e.inner_type = inner_type;
+    e.count = count;
+    e.last_ms = now_ms;
+    e.expiry_ms = now_ms + _frag_ttl_ms;
+  }
+
+  FragEntry& e = _frags[slot];
+  if (e.inner_type != inner_type || e.count != count) {
+    _dropped++;
+    e.used = false;
+    return true;
+  }
+  uint16_t bit = (uint16_t)1 << index;
+  if (e.mask & bit) {
+    return true;   // duplicate fragment
+  }
+
+  uint16_t offset = (uint16_t)index * SHADOW_MAX_FRAG_PAYLOAD;
+  if (offset + frag_len > MAX_PACKET_PAYLOAD) {
+    _dropped++;
+    e.used = false;
+    return true;
+  }
+  memcpy(&e.payload[offset], frag_payload, frag_len);
+  e.mask |= bit;
+  if (index == count - 1) e.last_len = (uint8_t)frag_len;
+
+  e.last_ms = now_ms;
+  e.expiry_ms = now_ms + _frag_ttl_ms;
+
+  uint16_t complete_mask = (uint16_t)(((uint32_t)1 << count) - 1);
+  if (e.mask == complete_mask) {
+    uint16_t total = (uint16_t)(count - 1) * SHADOW_MAX_FRAG_PAYLOAD + e.last_len;
+    if (total > MAX_PACKET_PAYLOAD) {
+      _dropped++;
+      e.used = false;
+      return true;
+    }
+    memcpy(packet->payload, e.payload, total);
+    packet->payload_len = total;
+    packet->header = (uint8_t)((inner_type << PH_TYPE_SHIFT) | (packet->header & PH_ROUTE_MASK));
+    packet->shadow = false;
+    packet->shadow_wrapped = false;
+    packet->auth_ok = false;
+    packet->shadow_flags = 0;
+    e.used = false;
+    _frags_recv++;
+    _recv++;
+    return false;
+  }
+  return true;
+}
+
+bool ShadowNode::unwrapAndProcess(mesh::Mesh& mesh, mesh::Packet* packet) {
+  _saved_valid = false;   // only valid for the packet currently being processed
+  if (!_enabled) return false;
+  if (!shadow::hasShadowMarker(packet)) return false;
+
+  uint8_t tag[SHADOW_TAG_SIZE];
+  uint8_t flags = 0;
+  if (!shadow::parseHeader(packet, tag, &flags)) {
+    // Correct marker but an unsupported future version. A repeater must
+    // forward it unchanged; an endpoint has nothing to do with it.
+    if (!_unwrap_all) return false;
+    _dropped++;
+    return true;
+  }
+
+  uint8_t mode = shadow::modeOf(flags);
+  unsigned long now_ms = mesh.getMillis();
+
+  if (mode == SHADOW_MODE_SIGNATURE) {
+    // Nodes do not need signature packets; leaving them to normal Mesh
+    // processing lets a repeater-capable node forward them unchanged.
+    return false;
+  }
+  if (mode == SHADOW_MODE_FRAGMENT) {
+    if (!_unwrap_all) return false;   // repeater forwards fragments unchanged
+    if (packet->payload_len < SHADOW_FRAG_OVERHEAD) {
+      _dropped++;
+      return true;
+    }
+    uint8_t inner_type = packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 2];
+    uint16_t frag_len = packet->payload_len - SHADOW_FRAG_OVERHEAD;
+    const uint8_t* frag_payload = &packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 3];
+    return processFragment(mesh, packet, tag, inner_type, frag_payload, frag_len, now_ms);
+  }
+
+  uint8_t inner_type;
+  const uint8_t* inner;
+  uint16_t inner_len;
+
+  if (mode == SHADOW_MODE_EMBEDDED) {
+    if (packet->payload_len < SHADOW_EMBEDDED_OVERHEAD) {
+      _dropped++;
+      return true;
+    }
+    inner_type = packet->payload[SHADOW_COMMON_SIZE];
+    inner = &packet->payload[SHADOW_COMMON_SIZE + 1];
+    inner_len = packet->payload_len - SHADOW_EMBEDDED_OVERHEAD;
+  } else if (mode == SHADOW_MODE_MESSAGE) {
+    if (packet->payload_len < SHADOW_MSG_OVERHEAD) {
+      _dropped++;
+      return true;
+    }
+    inner_type = packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE];
+    inner = &packet->payload[SHADOW_MSG_OVERHEAD];
+    inner_len = packet->payload_len - SHADOW_MSG_OVERHEAD;
+  } else {
+    _dropped++;
+    return true;
+  }
+
+  if (inner_type == PAYLOAD_TYPE_ADVERT) {
+    // A repeater unwraps only zero-hop adverts (neighbour discovery); flood
+    // adverts and direct transit adverts keep the envelope for forwarding.
+    if (!_unwrap_all
+        && !(packet->isRouteDirect() && packet->getPathHashCount() == 0)) {
+      return false;
+    }
+    if (_unwrap_all && _forward_envelopes && packet->isRouteFlood()
+        && inner_len <= MAX_PACKET_PAYLOAD) {
+      saveEnvelope(packet);
+    }
+    return unwrapLocal(packet, inner_type, inner, inner_len);
+  }
+
+  bool direct_type = inner_type == PAYLOAD_TYPE_TXT_MSG || inner_type == PAYLOAD_TYPE_REQ
+                  || inner_type == PAYLOAD_TYPE_RESPONSE || inner_type == PAYLOAD_TYPE_PATH;
+  if (direct_type) {
+    // Direct payloads carry a destination hash as their first inner byte.
+    // Never unwrap someone else's transit packet: leave the envelope intact
+    // so a repeater-capable node can forward it.
+    if (inner_len < 1 || !_self.isHashMatch(inner)) return false;
+    if (packet->isRouteDirect() && packet->getPathHashCount() > 0) return false;
+  } else if (!_unwrap_all) {
+    // A repeater only unwraps direct traffic addressed to itself; group
+    // traffic stays wrapped and is forwarded.
+    return false;
+  }
+
+  if (_unwrap_all && _forward_envelopes && packet->isRouteFlood()
+      && inner_len <= MAX_PACKET_PAYLOAD) {
+    saveEnvelope(packet);
+  }
+  return unwrapLocal(packet, inner_type, inner, inner_len);
+}
+
+void ShadowNode::poll(unsigned long now_ms) {
+  for (int i = 0; i < SHADOW_FRAG_MAX; i++) {
+    FragEntry& e = _frags[i];
+    if (e.used && (long)(now_ms - e.expiry_ms) >= 0) {
+      e.used = false;
+      _dropped++;
+    }
+  }
+}
+
+void ShadowNode::formatStatus(char* reply, size_t reply_len) const {
+  const char* mode_name = "auto";
+  if (_mode == SHADOW_MODE_EMBEDDED) mode_name = "embedded";
+  else if (_mode == SHADOW_MODE_MESSAGE) mode_name = "detached";
+  else if (_mode == SHADOW_MODE_FRAGMENT) mode_name = "fragment";
+  int frags = 0;
+  for (int i = 0; i < SHADOW_FRAG_MAX; i++) if (_frags[i].used) frags++;
+
+  snprintf(reply, reply_len,
+           "enabled=%d mode=%s frag=%d/%d\n"
+           "sig_id=%lu frag_id=%lu\n"
+           "sent=%lu recv=%lu frags=%lu dropped=%lu",
+           (int)_enabled, mode_name, frags, SHADOW_FRAG_MAX,
+           (unsigned long)_sig_id, (unsigned long)_frag_id,
+           (unsigned long)_sent, (unsigned long)_recv,
+           (unsigned long)_frags_recv, (unsigned long)_dropped);
+}
+
+static bool parseOnOff(const char* value, bool* out) {
+  if (strcmp(value, "on") == 0 || strcmp(value, "1") == 0) { *out = true; return true; }
+  if (strcmp(value, "off") == 0 || strcmp(value, "0") == 0) { *out = false; return true; }
+  return false;
+}
+
+bool ShadowNode::handleCommand(const char* command, char* reply, size_t reply_len) {
+  if (strncmp(command, "shd.", 4) != 0) return false;
+
+  char name[32];
+  const char* args = "";
+  const char* sp = strchr(command, ' ');
+  if (sp != NULL) {
+    size_t n = sp - command;
+    if (n >= sizeof(name)) n = sizeof(name) - 1;
+    memcpy(name, command, n);
+    name[n] = 0;
+    args = sp + 1;
+    while (*args == ' ') args++;
+  } else {
+    strncpy(name, command, sizeof(name) - 1);
+    name[sizeof(name) - 1] = 0;
+  }
+
+  bool b;
+  if (strcmp(name, "shd.enabled") == 0) {
+    if (!parseOnOff(args, &b)) { snprintf(reply, reply_len, "Err - on|off"); return true; }
+    _enabled = b;
+    snprintf(reply, reply_len, "OK - shadow %s", b ? "enabled" : "disabled");
+    return true;
+  }
+  if (strcmp(name, "shd.mode") == 0) {
+    if (strcmp(args, "auto") == 0) _mode = SHADOW_MODE_AUTO;
+    else if (strcmp(args, "embedded") == 0) _mode = SHADOW_MODE_EMBEDDED;
+    else if (strcmp(args, "detached") == 0) _mode = SHADOW_MODE_MESSAGE;
+    else if (strcmp(args, "fragment") == 0) _mode = SHADOW_MODE_FRAGMENT;
+    else { snprintf(reply, reply_len, "Err - auto|embedded|detached|fragment"); return true; }
+    snprintf(reply, reply_len, "OK");
+    return true;
+  }
+  if (strcmp(name, "shd.status") == 0) {
+    formatStatus(reply, reply_len);
+    return true;
+  }
+
+  snprintf(reply, reply_len, "Err - unknown shd command");
+  return true;
+}

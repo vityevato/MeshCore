@@ -156,6 +156,20 @@ protected:
 
   virtual DispatcherAction onRecvPacket(Packet* pkt) = 0;
 
+  /**
+   * \brief  Early receive filter, called after parsing and before the inbound
+   *         queue / packet pool are used. Return true to drop the packet.
+   *         Used by the shadow transit auth layer.
+   */
+  virtual bool filterRecvPacket(Packet* pkt) { return false; }
+
+  /**
+   * \brief  Last-chance hook before a packet is queued for transmission.
+   *         Return true if the hook consumed (and released) the packet.
+   *         Used by the shadow sender to wrap/replace ordinary packets.
+   */
+  virtual bool shadowWrapSend(Packet* packet, uint8_t priority, uint32_t delay_millis) { return false; }
+
   virtual void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) { }   // custom hook
 
   virtual void logRx(Packet* packet, int len, float score) { }   // hooks for custom logging
@@ -180,6 +194,19 @@ public:
   void releasePacket(Packet* packet);
   void sendPacket(Packet* packet, uint8_t priority, uint32_t delay_millis=0);
 
+  /**
+   * \brief  Queue a packet without invoking the shadow wrapping hook.
+   *         Used for packets that are already shadow envelopes.
+   */
+  void sendPacketRaw(Packet* packet, uint8_t priority, uint32_t delay_millis=0);
+
+  /**
+   * \brief  Queue a packet into the inbound (delayed) queue directly.
+   *         Used to release packets held by the shadow pending queue.
+   */
+  void queueInboundPacket(Packet* packet, uint32_t delay_millis=0);
+
+  unsigned long getMillis() const { return _ms->getMillis(); }
   unsigned long getTotalAirTime() const { return total_air_time; }
   unsigned long getReceiveAirTime() const {return rx_air_time; }
   unsigned long getRemainingTxBudget() const { return tx_budget_ms; }

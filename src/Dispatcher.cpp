@@ -139,7 +139,16 @@ void Dispatcher::loop() {
   {
     Packet* pkt = _mgr->getNextInbound(_ms->getMillis());
     if (pkt) {
-      processRecvPacket(pkt);
+      if (!pkt->recv_filtered) {
+        // Packets injected by a bridge (or another side channel) bypass
+        // checkRecv(); apply the same shadow policy before processing.
+        pkt->recv_filtered = true;
+        if (filterRecvPacket(pkt)) {
+          _mgr->free(pkt);
+          pkt = NULL;
+        }
+      }
+      if (pkt) processRecvPacket(pkt);
     }
   }
   checkRecv();
@@ -148,6 +157,12 @@ void Dispatcher::loop() {
 
 bool Dispatcher::tryParsePacket(Packet* pkt, const uint8_t* raw, int len) {
   int i = 0;
+
+  pkt->shadow = false;
+  pkt->shadow_wrapped = false;
+  pkt->auth_ok = false;
+  pkt->recv_filtered = false;
+  pkt->shadow_flags = 0;
 
   pkt->header = raw[i++];
   if (pkt->getPayloadVer() > PAYLOAD_VER_1) {
@@ -204,9 +219,15 @@ void Dispatcher::checkRecv() {
       } else {
         if (tryParsePacket(pkt, raw, len)) {
           pkt->_snr = _radio->getLastSNR() * 4.0f;
-          score = _radio->packetScore(_radio->getLastSNR(), len);
-          air_time = _radio->getEstAirtimeFor(len);
-          rx_air_time += air_time;
+          if (filterRecvPacket(pkt)) {  // early shadow / transit policy filter
+            _mgr->free(pkt);            // put back into pool
+            pkt = NULL;
+          } else {
+            pkt->recv_filtered = true;
+            score = _radio->packetScore(_radio->getLastSNR(), len);
+            air_time = _radio->getEstAirtimeFor(len);
+            rx_air_time += air_time;
+          }
         } else {
           _mgr->free(pkt);  // put back into pool
           pkt = NULL;
@@ -360,6 +381,11 @@ Packet* Dispatcher::obtainNewPacket() {
   } else {
     pkt->payload_len = pkt->path_len = 0;
     pkt->_snr = 0;
+    pkt->shadow = false;
+    pkt->shadow_wrapped = false;
+    pkt->auth_ok = false;
+    pkt->recv_filtered = false;
+    pkt->shadow_flags = 0;
   }
   return pkt;
 }
@@ -369,12 +395,24 @@ void Dispatcher::releasePacket(Packet* packet) {
 }
 
 void Dispatcher::sendPacket(Packet* packet, uint8_t priority, uint32_t delay_millis) {
+  if (shadowWrapSend(packet, priority, delay_millis)) {
+    return;  // hook took ownership (wrapped / fragmented / released)
+  }
+  sendPacketRaw(packet, priority, delay_millis);
+}
+
+void Dispatcher::sendPacketRaw(Packet* packet, uint8_t priority, uint32_t delay_millis) {
   if (!Packet::isValidPathLen(packet->path_len) || packet->payload_len > MAX_PACKET_PAYLOAD) {
     MESH_DEBUG_PRINTLN("%s Dispatcher::sendPacket(): ERROR: invalid packet... path_len=%d, payload_len=%d", getLogDateTime(), (uint32_t) packet->path_len, (uint32_t) packet->payload_len);
     _mgr->free(packet);
   } else {
     _mgr->queueOutbound(packet, priority, futureMillis(delay_millis));
   }
+}
+
+void Dispatcher::queueInboundPacket(Packet* packet, uint32_t delay_millis) {
+  packet->recv_filtered = true;   // already authorized (shadow pending release)
+  _mgr->queueInbound(packet, futureMillis(delay_millis));
 }
 
 // Utility function -- handles the case where millis() wraps around back to zero

@@ -126,6 +126,12 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     if (perms != PERM_ACL_GUEST) {   // keep number of FS writes to a minimum
       dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
     }
+
+    // Successful password login authorizes this node's public key for ordinary
+    // traffic through enforcing repeaters.
+    if (shadow_auth.enabled() && shadow_auth.getPrefs().auto_add && perms != PERM_ACL_GUEST) {
+      shadow_auth.allow(sender.pub_key, getRTCClock()->getCurrentTime());
+    }
   }
 
   if (is_flood) {
@@ -431,8 +437,16 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
   }
 }
 
+bool MyMesh::filterRecvPacket(mesh::Packet* packet) {
+  return shadow_auth.filter(*this, packet);
+}
+
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   if (_prefs.disable_fwd) return false;
+  if (shadow_auth.enabled() && shadow_auth.enforce() && !packet->auth_ok) {
+    MESH_DEBUG_PRINTLN("allowPacketForward: shadow source not authorized");
+    return false;
+  }
   if (packet->isRouteFlood()
       && mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max, _prefs.flood_max_unscoped, _prefs.flood_max_advert)) {
     return false;
@@ -863,6 +877,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
     : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
       region_map(key_store), temp_map(key_store),
+      shadow_node(self_id, rng),
       _cli(board, rtc, sensors, region_map, acl, &_prefs, this),
       telemetry(MAX_PACKET_PAYLOAD - 4),
       discover_limiter(4, 120),  // max 4 every 2 minutes
@@ -878,6 +893,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   uptime_millis = 0;
   next_local_advert = next_flood_advert = 0;
   dirty_contacts_expiry = 0;
+  next_shadow_save = 0;
   set_radio_at = revert_radio_at = 0;
   _logging = false;
   region_load_active = false;
@@ -948,6 +964,25 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   _cli.loadPrefs(_fs);
   acl.load(_fs, self_id);
+  shadow_auth.begin(_fs, getRTCClock()->getCurrentTime());
+  // One-time migration of authenticated ACL clients into the shadow
+  // allowlist. Without this, enabling enforcement would lock them out until
+  // their next login; repeating it every boot would undo shd.remove.
+  if (!shadow_auth.getPrefs().acl_migrated) {
+    for (int i = 0; i < acl.getNumClients(); i++) {
+      auto c = acl.getClientByIdx(i);
+      if (c->permissions == 0) continue;   // deleted / transient guest
+      if (!shadow_auth.contains(c->id.pub_key)) {
+        shadow_auth.allow(c->id.pub_key, c->last_activity);
+      }
+    }
+    shadow_auth.getPrefs().acl_migrated = 1;
+    shadow_auth.markPrefsDirty();
+  }
+  shadow_node.setEnabled(shadow_auth.enabled());
+  shadow_node.setUnwrapAll(false);   // repeater: only unwrap local traffic
+  setShadowSendHook(&shadow_node);
+  setShadowRecvHook(&shadow_node);
   // TODO: key_store.begin();
   region_map.load(_fs);
 
@@ -997,6 +1032,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size) {
+  shadow_node.setTransportKey(scope.isNull() ? NULL : scope.key);
   if (scope.isNull()) {
     sendFlood(pkt, delay_millis, path_hash_size);
   } else {
@@ -1005,6 +1041,7 @@ void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint3
     codes[1] = 0;  // REVISIT: set to 'home' Region, for sender/return region?
     sendFlood(pkt, codes, delay_millis, path_hash_size);
   }
+  shadow_node.setTransportKey(NULL);
 }
 
 void MyMesh::applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) {
@@ -1238,6 +1275,27 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     command += 3;
   }
 
+  // shadow transit auth CLI
+  if (strncmp(command, "shd.", 4) == 0) {
+    if (sender_timestamp == 0 && strcmp(command, "shd.list") == 0) {
+      Serial.printf("SHADOW ACL (%d):\n", shadow_auth.getNumAllowed());
+      for (int i = 0; i < shadow_auth.getNumAllowed(); i++) {
+        mesh::Utils::printHex(Serial, shadow_auth.getAllowedKey(i), PUB_KEY_SIZE);
+        Serial.printf("\n");
+      }
+      reply[0] = 0;
+      return;
+    }
+    shadow_auth.handleCommand(*this, command, reply, 160);
+    if (shadow_auth.needsSave()) {
+      shadow_auth.getPrefs().saved_at = getRTCClock()->getCurrentTime();
+      shadow_auth.savePrefs(_fs);
+      shadow_auth.saveAllowListNow(_fs);
+    }
+    shadow_node.setEnabled(shadow_auth.enabled());
+    return;
+  }
+
   // handle ACL related commands
   if (memcmp(command, "setperm ", 8) == 0) {   // format:  setperm {pubkey-hex} {permissions-int8}
     char* hex = &command[8];
@@ -1292,6 +1350,15 @@ void MyMesh::loop() {
 #endif
 
   mesh::Mesh::loop();
+
+  shadow_auth.poll(*this, millis());
+  shadow_node.poll(millis());
+  if (shadow_auth.needsSave() && millisHasNowPassed(next_shadow_save)) {
+    shadow_auth.getPrefs().saved_at = getRTCClock()->getCurrentTime();
+    shadow_auth.savePrefs(_fs);
+    shadow_auth.saveAllowListNow(_fs);
+    next_shadow_save = futureMillis(5000);
+  }
 
   if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
     mesh::Packet *pkt = createSelfAdvert();

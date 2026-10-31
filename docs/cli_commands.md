@@ -14,6 +14,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
   - [System](#system)
   - [Routing](#routing)
   - [ACL](#acl)
+  - [Shadow Transit Auth](#shadow-transit-auth)
   - [Region Management](#region-management-v110)
     - [Region Examples](#region-examples)
   - [GPS](#gps-when-gps-support-is-compiled-in)
@@ -748,6 +749,109 @@ adverts running, set an explicit value in the 60-240 range.
 - `state`: `on` (enable) or `off` (disable)
 
 **Default:** `off`
+
+---
+
+### Shadow Transit Auth
+
+Optional source allowlisting for repeaters. See
+[shadow_transit_auth.md](shadow_transit_auth.md) for the envelope format and
+design.
+
+#### Enable the shadow layer
+**Usage:**
+- `shd.enabled on|off`
+
+**Default:** `on`
+
+---
+
+#### Enable enforcement
+**Usage:**
+- `shd.enforce on|off`
+
+When `off`, the repeater verifies and counts but still forwards everything.
+**Default:** `off`
+
+---
+
+#### Login exception
+**Usage:**
+- `shd.allow.anon on|off`
+
+Allows ordinary `ANON_REQ` login/admin requests with a rate limit.
+**Default:** `on`
+
+---
+
+#### Advert policy
+**Usage:**
+- `shd.allow.advert on|off`
+
+`off` forwards only adverts whose public key is on the shadow allowlist.
+`on` forwards all valid signed adverts.
+This applies to both ordinary adverts and shadow-wrapped adverts; for wrapped
+adverts the policy is applied to the inner advert's public key.
+The advert limit is 8 per minute per tag and is kept separately from the
+transit-packet rate limit. The policy is enforced while `shd.enforce on`.
+**Default:** `off`
+
+---
+
+#### Auto-add after a successful password login
+**Usage:**
+- `shd.auto.add on|off`
+
+**Default:** `on`
+
+---
+
+#### Pending message queue size
+**Usage:**
+- `shd.pending.max <n>`
+
+**Parameters:**
+- `n`: 1..20 (1..8 with `SHADOW_LOW_MEMORY`)
+
+**Default:** `20`
+
+---
+
+#### Dynamic hold TTL
+**Usage:**
+- `shd.hold.min <ms>`
+- `shd.hold.max <ms>`
+- `shd.hold.default <ms>`
+- `shd.margin <ms>`
+
+**Defaults:** `45000`, `180000`, `60000`, `2000`
+
+---
+
+#### Show shadow status
+**Usage:**
+- `shd.status`
+
+---
+
+#### Allowlist management
+**Usage:**
+- `shd.allow <pubkey-hex>`
+- `shd.remove <pubkey-hex>`
+- `shd.list`
+
+`pubkey-hex` is the full 32-byte public key (64 hex characters). `shd.list`
+prints the keys on the local serial console.
+
+---
+
+#### Node / companion shadow commands
+**Usage:**
+- `shd.enabled on|off`   (default `on`)
+- `shd.mode auto|embedded|detached|fragment`
+- `shd.status`
+
+`shd.mode` is a debug/force setting; normal operation uses `auto`.
 
 ---
 

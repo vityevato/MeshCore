@@ -4,6 +4,39 @@
 
 namespace mesh {
 
+class Mesh;
+
+/**
+ * \brief  Pluggable sender used by the shadow transit auth layer. It receives
+ *         fully routed packets (route/path/transport codes already set) and may
+ *         replace them with one or more signed shadow packets.
+ */
+class ShadowSendHook {
+public:
+  virtual ~ShadowSendHook() { }
+  virtual bool wrapAndSend(Mesh& mesh, Packet* packet, uint8_t priority, uint32_t delay_millis) = 0;
+};
+
+/**
+ * \brief  Pluggable receiver used by the shadow transit auth layer. Return true
+ *         if the packet was consumed (e.g. a partial fragment or a signature
+ *         packet on a node). If it returns false, Mesh continues to process the
+ *         packet, possibly after the hook rewrote it in place.
+ */
+class ShadowRecvHook {
+public:
+  virtual ~ShadowRecvHook() { }
+  virtual bool unwrapAndProcess(Mesh& mesh, Packet* packet) = 0;
+
+  /**
+   * \brief  Called when a packet that was rewritten in place by
+   *         unwrapAndProcess() is about to be retransmitted. A node that also
+   *         acts as a repeater can restore the original shadow envelope here,
+   *         so downstream repeaters receive the authenticated envelope.
+   */
+  virtual void prepareForward(Packet* packet) { (void)packet; }
+};
+
 class GroupChannel {
 public:
   uint8_t hash[PATH_HASH_SIZE];
@@ -28,6 +61,8 @@ class Mesh : public Dispatcher {
   RTCClock* _rtc;
   RNG* _rng;
   MeshTables* _tables;
+  ShadowSendHook* _shadow_send;
+  ShadowRecvHook* _shadow_recv;
 
   void removeSelfFromPath(Packet* packet);
   void routeDirectRecvAcks(Packet* packet, uint32_t delay_millis);
@@ -167,8 +202,13 @@ protected:
   virtual void onAckRecv(Packet* packet, uint32_t ack_crc) { }
 
   Mesh(Radio& radio, MillisecondClock& ms, RNG& rng, RTCClock& rtc, PacketManager& mgr, MeshTables& tables)
-    : Dispatcher(radio, ms, mgr), _rng(&rng), _rtc(&rtc), _tables(&tables)
+    : Dispatcher(radio, ms, mgr), _rng(&rng), _rtc(&rtc), _tables(&tables),
+      _shadow_send(NULL), _shadow_recv(NULL)
   {
+  }
+
+  bool shadowWrapSend(Packet* packet, uint8_t priority, uint32_t delay_millis) override {
+    return _shadow_send != NULL && _shadow_send->wrapAndSend(*this, packet, priority, delay_millis);
   }
 
   MeshTables* getTables() const { return _tables; }
@@ -176,6 +216,23 @@ protected:
 public:
   void begin();
   void loop();
+
+  void setShadowSendHook(ShadowSendHook* hook) { _shadow_send = hook; }
+  void setShadowRecvHook(ShadowRecvHook* hook) { _shadow_recv = hook; }
+
+  MeshTables* packetTables() const { return _tables; }
+
+  /**
+   * \returns true if the packet payload starts with the fixed shadow marker.
+   *          This is only a cheap shape test; signature verification is separate.
+   */
+  static bool isShadowPacket(const Packet* packet) {
+    return packet->getPayloadType() == PAYLOAD_TYPE_GRP_TXT
+        && packet->payload_len >= SHADOW_COMMON_SIZE
+        && packet->payload[0] == SHADOW_CHANNEL_HASH
+        && packet->payload[1] == (uint8_t)(SHADOW_MAGIC & 0xFF)
+        && packet->payload[2] == (uint8_t)((SHADOW_MAGIC >> 8) & 0xFF);
+  }
 
   LocalIdentity self_id;
 

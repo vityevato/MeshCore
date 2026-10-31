@@ -68,6 +68,7 @@
 
 #include <helpers/BaseChatMesh.h>
 #include <helpers/TransportKeyStore.h>
+#include <helpers/ShadowNode.h>
 
 /* -------------------------------------------------------------------------------------- */
 
@@ -241,6 +242,7 @@ private:
 
   DataStore* _store;
   NodePrefs _prefs;
+  ShadowNode shadow_node;
   uint32_t pending_login;
   uint32_t pending_status;
   uint32_t pending_telemetry, pending_discovery;   // pending _TELEMETRY_REQ

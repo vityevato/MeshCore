@@ -22,6 +22,104 @@
 #define MAX_PATH_SIZE        64
 #define MAX_TRANS_UNIT      255
 
+// ---------------------------------------------------------------------------
+// Shadow transit auth (shd.*)
+//
+// A per-node signed envelope carried inside an ordinary GRP_TXT v1 packet.
+// Old repeaters forward it as a normal group packet; old nodes ignore it.
+// ---------------------------------------------------------------------------
+
+#define SHADOW_CH_SIZE             1
+#define SHADOW_MAGIC_SIZE          2
+#define SHADOW_TAG_SIZE            2
+#define SHADOW_FLAGS_SIZE          1
+#define SHADOW_COMMON_SIZE         (SHADOW_CH_SIZE + SHADOW_MAGIC_SIZE + SHADOW_TAG_SIZE + SHADOW_FLAGS_SIZE)
+
+#define SHADOW_SIG_ID_SIZE         4
+#define SHADOW_MSG_HASH_SIZE      16
+#define SHADOW_DIGEST_SIZE        32   // full SHA-256 used for Ed25519 signing
+
+#define SHADOW_VERSION             0
+#define SHADOW_FLAG_MODE_MASK      0x03
+#define SHADOW_FLAG_VERSION_SHIFT  4
+#define SHADOW_FLAG_VERSION_MASK   0x0F
+
+#define SHADOW_MODE_EMBEDDED       0
+#define SHADOW_MODE_SIGNATURE      1
+#define SHADOW_MODE_MESSAGE        2
+#define SHADOW_MODE_FRAGMENT       3
+#define SHADOW_MODE_AUTO           0xFF
+
+// v1 fixed network marker. Both bytes are visible to old nodes as a normal
+// group channel hash + group MAC. Change only with a protocol revision.
+#define SHADOW_CHANNEL_HASH        0x53
+#define SHADOW_MAGIC               0x5CC5
+
+#define SHADOW_EMBEDDED_OVERHEAD   (SHADOW_COMMON_SIZE + 1 + SIGNATURE_SIZE)          // 71
+#define SHADOW_SIG_PACKET_SIZE     (SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + SHADOW_MSG_HASH_SIZE + SIGNATURE_SIZE) // 90
+#define SHADOW_MSG_OVERHEAD        (SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 1)      // 11
+#define SHADOW_FRAG_OVERHEAD       (SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 1 + 1 + 1 + SIGNATURE_SIZE) // 77
+
+#define SHADOW_MAX_INNER_EMBEDDED  (MAX_PACKET_PAYLOAD - SHADOW_EMBEDDED_OVERHEAD)    // 113
+#define SHADOW_MAX_INNER_MSG       (MAX_PACKET_PAYLOAD - SHADOW_MSG_OVERHEAD)         // 173
+#define SHADOW_MAX_FRAG_PAYLOAD    (MAX_PACKET_PAYLOAD - SHADOW_FRAG_OVERHEAD)        // 107
+
+// Compile-time memory profile. Define SHADOW_LOW_MEMORY for 64-128 KB MCUs.
+#ifdef SHADOW_LOW_MEMORY
+  #ifndef SHADOW_PENDING_MAX
+    #define SHADOW_PENDING_MAX       8
+  #endif
+  #ifndef SHADOW_VERIFIED_CACHE_SIZE
+    #define SHADOW_VERIFIED_CACHE_SIZE 64
+  #endif
+  #ifndef SHADOW_SIG_CACHE_SIZE
+    #define SHADOW_SIG_CACHE_SIZE    8
+  #endif
+  #ifndef SHADOW_FRAG_MAX
+    #define SHADOW_FRAG_MAX          2
+  #endif
+#else
+  #ifndef SHADOW_PENDING_MAX
+    #define SHADOW_PENDING_MAX       20
+  #endif
+  #ifndef SHADOW_VERIFIED_CACHE_SIZE
+    #define SHADOW_VERIFIED_CACHE_SIZE 160
+  #endif
+  #ifndef SHADOW_SIG_CACHE_SIZE
+    #define SHADOW_SIG_CACHE_SIZE    16
+  #endif
+  #ifndef SHADOW_FRAG_MAX
+    #define SHADOW_FRAG_MAX          4
+  #endif
+#endif
+
+#ifdef SHADOW_LOW_MEMORY
+  #ifndef SHADOW_MAX_ALLOW
+    #define SHADOW_MAX_ALLOW         16
+  #endif
+#else
+  #ifndef SHADOW_MAX_ALLOW
+    #define SHADOW_MAX_ALLOW         32
+  #endif
+#endif
+#ifndef SHADOW_TTL_SAMPLES
+  #define SHADOW_TTL_SAMPLES         32
+#endif
+
+#define SHADOW_HOLD_MIN_MS          45000UL
+#define SHADOW_HOLD_MAX_MS          180000UL
+#define SHADOW_HOLD_DEFAULT_MS      60000UL
+#define SHADOW_MARGIN_MS            2000UL
+#define SHADOW_SIG_TTL_MIN_MS       75000UL
+#define SHADOW_SIG_TTL_DEFAULT_MS   90000UL
+#define SHADOW_SIG_TTL_MAX_MS       240000UL
+#define SHADOW_FRAG_TTL_MIN_MS      45000UL
+#define SHADOW_FRAG_TTL_DEFAULT_MS  60000UL
+#define SHADOW_FRAG_TTL_MAX_MS      180000UL
+
+#define SHADOW_SIG_MSG_DELAY_MS     300UL
+#define SHADOW_FRAG_GAP_MS          250UL
+
 #if MESH_DEBUG && ARDUINO
   #include <Arduino.h>
   #define MESH_DEBUG_PRINT(F, ...) Serial.printf("DEBUG: " F, ##__VA_ARGS__)

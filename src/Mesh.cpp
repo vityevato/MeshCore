@@ -39,6 +39,18 @@ int Mesh::searchChannelsByHash(const uint8_t* hash, GroupChannel channels[], int
 }
 
 DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
+  // Shadow-aware nodes may unwrap/consume the envelope before the normal
+  // payload dispatch. A repeater installs the same hook with unwrapAll=false,
+  // so it only unwraps traffic addressed to itself and forwards the rest
+  // unchanged.
+  bool was_shadow = false;
+  if (_shadow_recv != NULL && isShadowPacket(pkt)) {
+    was_shadow = true;
+    if (_shadow_recv->unwrapAndProcess(*this, pkt)) {
+      return ACTION_RELEASE;
+    }
+  }
+
   if (pkt->isRouteDirect() && pkt->getPayloadType() == PAYLOAD_TYPE_TRACE) {
     if (pkt->path_len < MAX_PATH_SIZE) {
       uint8_t i = 0;
@@ -327,6 +339,13 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       MESH_DEBUG_PRINTLN("%s Mesh::onRecvPacket(): unknown payload type, header: %d", getLogDateTime(), (int) pkt->header);
       // Don't flood route unknown packet types!   action = routeRecvPacket(pkt);
       break;
+  }
+
+  // A node that also repeats must forward the original signed envelope, not
+  // the locally unwrapped payload. prepareForward() restores it only if
+  // unwrapAndProcess() saved one.
+  if (was_shadow && action != ACTION_RELEASE && action != ACTION_MANUAL_HOLD) {
+    _shadow_recv->prepareForward(pkt);
   }
   return action;
 }

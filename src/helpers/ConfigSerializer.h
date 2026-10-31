@@ -7,7 +7,7 @@
 #endif
 
 #ifndef CONFIG_MAX_KEYLEN
-  #define CONFIG_MAX_KEYLEN  16
+  #define CONFIG_MAX_KEYLEN  24
 #endif
 
 #ifndef CONFIG_MAX_TOKEN_LEN

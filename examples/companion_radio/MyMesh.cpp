@@ -111,6 +111,23 @@
 #define DIRECT_SEND_PERHOP_EXTRA_MILLIS 250
 #define LAZY_CONTACTS_WRITE_DELAY       5000
 
+// Persisted shd_mode: 0 auto, 1 embedded, 2 detached, 3 fragment.
+// Internal ShadowNode modes: 0 embedded, 2 message, 3 fragment, 0xFF auto.
+static uint8_t shadowPrefToMode(uint8_t v) {
+  if (v == 0) return SHADOW_MODE_AUTO;
+  if (v == 1) return SHADOW_MODE_EMBEDDED;
+  if (v == 2) return SHADOW_MODE_MESSAGE;
+  if (v == 3) return SHADOW_MODE_FRAGMENT;
+  return SHADOW_MODE_AUTO;
+}
+static uint8_t shadowModeToPref(uint8_t m) {
+  if (m == SHADOW_MODE_AUTO) return 0;
+  if (m == SHADOW_MODE_EMBEDDED) return 1;
+  if (m == SHADOW_MODE_MESSAGE) return 2;
+  if (m == SHADOW_MODE_FRAGMENT) return 3;
+  return 0;
+}
+
 #define PUBLIC_GROUP_PSK                "izOH6cXN6mrJ5e26oRXNcg=="
 
 // these are _pushed_ to client app at any time
@@ -489,6 +506,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis) {
+  shadow_node.setTransportKey(scope.isNull() ? NULL : scope.key);
   if (scope.isNull()) {
     sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);
   } else {
@@ -497,11 +515,13 @@ void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint3
     codes[1] = 0;  // REVISIT: set to 'home' Region, for sender/return region?
     sendFlood(pkt, codes, delay_millis, _prefs.path_hash_mode + 1);
   }
+  shadow_node.setTransportKey(NULL);
 }
 
 void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis) {
   // TODO: dynamic send_scope, depending on recipient and current 'home' Region
   if (send_unscoped) {
+    shadow_node.setTransportKey(NULL);
     sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);  // app has explicitly requested un-scoped
   } else {
     TransportKey default_scope;
@@ -514,6 +534,7 @@ void MyMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, ui
 void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis) {
   // TODO: have per-channel send_scope
   if (send_unscoped) {
+    shadow_node.setTransportKey(NULL);
     sendFlood(pkt, delay_millis, _prefs.path_hash_mode + 1);  // app has explicitly requested un-scoped
   } else {
     TransportKey default_scope;
@@ -886,20 +907,26 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
 }
 
 uint32_t MyMesh::calcFloodTimeoutMillisFor(uint32_t pkt_airtime_millis) const {
-  return SEND_TIMEOUT_BASE_MILLIS + (FLOOD_SEND_TIMEOUT_FACTOR * pkt_airtime_millis);
+  uint32_t t = SEND_TIMEOUT_BASE_MILLIS + (FLOOD_SEND_TIMEOUT_FACTOR * pkt_airtime_millis);
+  // Shadow envelopes can add a signature packet and/or a second fragment.
+  if (shadow_node.enabled()) t += 2000;
+  return t;
 }
 uint32_t MyMesh::calcDirectTimeoutMillisFor(uint32_t pkt_airtime_millis, uint8_t path_len) const {
   uint8_t path_hash_count = path_len & 63;
-  return SEND_TIMEOUT_BASE_MILLIS +
+  uint32_t t = SEND_TIMEOUT_BASE_MILLIS +
          ((pkt_airtime_millis * DIRECT_SEND_PERHOP_FACTOR + DIRECT_SEND_PERHOP_EXTRA_MILLIS) *
           (path_hash_count + 1));
+  if (shadow_node.enabled()) t += 2000;
+  return t;
 }
 
 void MyMesh::onSendTimeout() {}
 
 MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMeshTables &tables, DataStore& store)
     : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables),
-      _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _listener(NULL), _iter(0) {
+      _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store),
+      shadow_node(self_id, rng), _listener(NULL), _iter(0) {
   _iter_started = false;
   _cli_rescue = false;
   cli_command[0] = 0;
@@ -940,6 +967,10 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.rx_boosted_gain = 1; // enabled by default
 #endif
 #endif
+
+  shadow_node.setUnwrapAll(true);   // companion: the endpoint unwraps all shadow traffic
+  setShadowSendHook(&shadow_node);
+  setShadowRecvHook(&shadow_node);
 }
 
 void MyMesh::begin() {
@@ -978,6 +1009,9 @@ void MyMesh::begin() {
 
   // load persisted prefs
   _store->loadPrefs(_prefs);
+  shadow_node.setEnabled(_prefs.shd_enabled != 0);
+  shadow_node.setMode(shadowPrefToMode(_prefs.shd_mode));
+  shadow_node.setForwardEnvelopes(_prefs.isRepeatEn());
   sensors.node_lat = _prefs.node_lat;
   sensors.node_lon = _prefs.node_lon;
 
@@ -1445,6 +1479,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       _prefs.freq = (float)freq / 1000.0;
       _prefs.bw = (float)bw / 1000.0;
       _prefs.setRepeatEn(repeat != 0);
+      shadow_node.setForwardEnvelopes(_prefs.isRepeatEn());
       savePrefs();
 
       radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
@@ -2086,6 +2121,20 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
     command += 3;
   }
 
+  // shadow transit auth CLI
+  if (strncmp(command, "shd.", 4) == 0) {
+    bool was_enabled = shadow_node.enabled();
+    uint8_t was_mode = shadow_node.mode();
+    if (shadow_node.handleCommand(command, reply, 160)) {
+      if (shadow_node.enabled() != was_enabled || shadow_node.mode() != was_mode) {
+        _prefs.shd_enabled = shadow_node.enabled() ? 1 : 0;
+        _prefs.shd_mode = shadowModeToPref(shadow_node.mode());
+        savePrefs();
+      }
+      return true;
+    }
+  }
+
   if (_prefs.getRadioPrefs()->handleCommand(command, sender_timestamp, reply)) {  // is radio CLI command?
     if (_prefs.getRadioPrefs()->isDirty()) { savePrefs(); }
     return true;
@@ -2414,6 +2463,7 @@ void MyMesh::checkSerialInterface() {
 
 void MyMesh::loop() {
   BaseChatMesh::loop();
+  shadow_node.poll(millis());
 
   if (_cli_rescue) {
     checkCLIRescueCmd();
