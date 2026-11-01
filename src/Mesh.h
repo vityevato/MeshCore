@@ -64,6 +64,13 @@ class Mesh : public Dispatcher {
   ShadowSendHook* _shadow_send;
   ShadowRecvHook* _shadow_recv;
 
+  // Context of the packet currently being dispatched to the on..Recv()
+  // callbacks. The shadow send hook uses it to mirror the request envelope
+  // for replies generated during that dispatch.
+  bool _dispatch_active;
+  bool _dispatch_shadow;
+  uint8_t _dispatch_type;
+
   void removeSelfFromPath(Packet* packet);
   void routeDirectRecvAcks(Packet* packet, uint32_t delay_millis);
   //void routeRecvAcks(Packet* packet, uint32_t delay_millis);
@@ -203,7 +210,8 @@ protected:
 
   Mesh(Radio& radio, MillisecondClock& ms, RNG& rng, RTCClock& rtc, PacketManager& mgr, MeshTables& tables)
     : Dispatcher(radio, ms, mgr), _rng(&rng), _rtc(&rtc), _tables(&tables),
-      _shadow_send(NULL), _shadow_recv(NULL)
+      _shadow_send(NULL), _shadow_recv(NULL), _dispatch_active(false),
+      _dispatch_shadow(false), _dispatch_type(0)
   {
   }
 
@@ -219,6 +227,19 @@ public:
 
   void setShadowSendHook(ShadowSendHook* hook) { _shadow_send = hook; }
   void setShadowRecvHook(ShadowRecvHook* hook) { _shadow_recv = hook; }
+
+  /**
+   * \returns true while Mesh is dispatching a received packet to the
+   *          on..Recv() callbacks. Used by the shadow send hook to mirror the
+   *          transport envelope of locally generated replies.
+   */
+  bool recvDispatchActive() const { return _dispatch_active; }
+
+  /** \returns true if the packet being dispatched was unwrapped from shadow. */
+  bool recvDispatchWasShadow() const { return _dispatch_shadow; }
+
+  /** \returns payload type of the packet being dispatched. */
+  uint8_t recvDispatchType() const { return _dispatch_type; }
 
   MeshTables* packetTables() const { return _tables; }
 

@@ -14,6 +14,10 @@
  *         (embedded / detached / fragment).
  * Receiver: unwraps them and hands the original payload back to Mesh.
  *
+ * TX and RX are independent. On a companion, shd.enabled only controls TX;
+ * RX stays enabled so the node can still read shadow traffic from peers.
+ * Repeaters set both from shd.enabled, so disabling it behaves like legacy.
+ *
  * Repeaters also use the sender half for locally generated responses/ACKs,
  * but must NOT unwrap transit packets: setUnwrapAll(false) makes the receiver
  * half unwrap only traffic addressed to this node.
@@ -35,7 +39,8 @@ class ShadowNode : public mesh::ShadowSendHook, public mesh::ShadowRecvHook {
 
   mesh::LocalIdentity& _self;
   mesh::RNG& _rng;
-  bool _enabled;
+  bool _tx_enabled;
+  bool _rx_enabled;
   uint8_t _mode;             // SHADOW_MODE_AUTO or a forced mode
   bool _unwrap_all;          // true on a normal node, false on a repeater
   bool _forward_envelopes;   // repeater-capable endpoint: forward original envelopes
@@ -80,8 +85,12 @@ class ShadowNode : public mesh::ShadowSendHook, public mesh::ShadowRecvHook {
 public:
   ShadowNode(mesh::LocalIdentity& self, mesh::RNG& rng);
 
-  void setEnabled(bool en) { _enabled = en; }
-  bool enabled() const { return _enabled; }
+  void setEnabled(bool en) { _tx_enabled = _rx_enabled = en; }
+  bool enabled() const { return _tx_enabled; }
+  void setTxEnabled(bool en) { _tx_enabled = en; }
+  bool txEnabled() const { return _tx_enabled; }
+  void setRxEnabled(bool en) { _rx_enabled = en; }
+  bool rxEnabled() const { return _rx_enabled; }
   void setMode(uint8_t mode);
   uint8_t mode() const { return _mode; }
   void setUnwrapAll(bool all) { _unwrap_all = all; }

@@ -754,15 +754,24 @@ adverts running, set an explicit value in the 60-240 range.
 
 ### Shadow Transit Auth
 
-Optional source allowlisting for repeaters. See
+Optional source allowlisting for repeaters, with companion-side wrapping and
+unwrapping. Only the Companion Radio and Simple Repeater firmware implement
+`shd.*`; the Sensor, Room Server and Secure Chat firmware behave as legacy
+nodes. See
 [shadow_transit_auth.md](shadow_transit_auth.md) for the envelope format and
-design.
+[firmware support](shadow_transit_auth.md#firmware-support).
 
 #### Enable the shadow layer
 **Usage:**
 - `shd.enabled on|off`
 
 **Default:** `on`
+
+On a repeater, `off` disables both wrapping and unwrapping, so it behaves like
+a legacy repeater. On a node/companion, `off` stops outgoing wrapping but the
+node still unwraps incoming shadow traffic. Locally generated replies mirror
+the envelope of the request that triggered them; `ANON_REQ` login replies stay
+wrapped so they can traverse enforcing repeaters.
 
 ---
 
@@ -866,6 +875,8 @@ is full, `shd.allow` returns `Err - allowlist full`; remove entries with
 - `shd.status`
 
 `shd.mode` is a debug/force setting; normal operation uses `auto`.
+`shd.enabled` controls only outgoing wrapping; incoming shadow envelopes are
+always unwrapped. `shd.status` reports `enabled` (TX) and `rx` separately.
 
 ---
 
@@ -1161,6 +1172,13 @@ region save
 ---
 
 ### Sensors (When sensor support is compiled in)
+
+**Note:** The Sensor firmware role (`simple_sensor`) does not implement Shadow
+Transit Auth. In a network with `shd.enforce on`, its telemetry, alerts and
+commands are dropped by enforcing repeaters; a shadow-enabled companion also
+cannot send normal requests to it. This does not affect optional sensor support
+compiled into a Companion or Repeater. See
+[shadow_transit_auth.md](shadow_transit_auth.md#firmware-support).
 
 #### View the list of sensors on this node
 **Usage:** `sensor list [start]`

@@ -39,6 +39,25 @@ int Mesh::searchChannelsByHash(const uint8_t* hash, GroupChannel channels[], int
 }
 
 DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
+  // Keep the receive context available to the send hook for the duration of
+  // this dispatch. Replies are generated synchronously from the on..Recv()
+  // callbacks below, so this covers them without per-packet plumbing.
+  struct ResetDispatch {
+    bool* active;
+    bool* shadow;
+    uint8_t* type;
+    bool prev_active;
+    bool prev_shadow;
+    uint8_t prev_type;
+    ResetDispatch(bool* a, bool* s, uint8_t* t)
+      : active(a), shadow(s), type(t), prev_active(*a), prev_shadow(*s), prev_type(*t) { }
+    ~ResetDispatch() {
+      *active = prev_active;
+      *shadow = prev_shadow;
+      *type = prev_type;
+    }
+  } reset(&_dispatch_active, &_dispatch_shadow, &_dispatch_type);
+
   // Shadow-aware nodes may unwrap/consume the envelope before the normal
   // payload dispatch. A repeater installs the same hook with unwrapAll=false,
   // so it only unwraps traffic addressed to itself and forwards the rest
@@ -50,6 +69,12 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       return ACTION_RELEASE;
     }
   }
+
+  // Set the context after the hook: unwrapAndProcess() is what marks
+  // shadow_unwrapped when it turns an envelope into an inner payload.
+  _dispatch_active = true;
+  _dispatch_shadow = pkt->shadow_unwrapped;
+  _dispatch_type = pkt->getPayloadType();
 
   if (pkt->isRouteDirect() && pkt->getPayloadType() == PAYLOAD_TYPE_TRACE) {
     if (pkt->path_len < MAX_PATH_SIZE) {

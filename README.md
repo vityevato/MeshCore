@@ -17,7 +17,7 @@ MeshCore provides the ability to create wireless mesh networks, similar to Mesht
 * Decentralized & Resilient – No central server or internet required; the network is self-healing.
 * Low Power Consumption – Ideal for battery-powered or solar-powered devices.
 * Simple to Deploy – Pre-built example applications make it easy to get started.
-* Optional Shadow Transit Auth – Repeaters can forward only traffic from allowlisted node keys, without changing the wire protocol for old repeaters. ([docs](./docs/shadow_transit_auth.md))
+* Optional Shadow Transit Auth (Companion and Repeater firmware) – Repeaters can forward only traffic from allowlisted node keys, without changing the wire protocol for old repeaters. ([docs](./docs/shadow_transit_auth.md))
 
 ## 🎯 What Can You Use MeshCore For?
 

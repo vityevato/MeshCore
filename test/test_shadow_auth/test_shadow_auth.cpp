@@ -72,7 +72,8 @@ public:
         Packet* p = &_pool[i];
         p->header = 0; p->payload_len = 0; p->path_len = 0;
         p->shadow = false; p->shadow_wrapped = false; p->auth_ok = false;
-        p->recv_filtered = false; p->local_only = false; p->shadow_flags = 0;
+        p->recv_filtered = false; p->local_only = false; p->shadow_unwrapped = false;
+        p->shadow_flags = 0;
         return p;
       }
     }
@@ -138,6 +139,9 @@ public:
     : Mesh(radio, clock, rng, rtc, mgr, tables), _mgr(&mgr) {
     for (int i = 0; i < PUB_KEY_SIZE; i++) self_id.pub_key[i] = (uint8_t)(0x40 + i);
   }
+
+  DispatcherAction recv(mesh::Packet* p) { return Mesh::onRecvPacket(p); }
+
 private:
   TestPacketManager* _mgr;
 };
@@ -181,6 +185,51 @@ public:
 
   void onGroupDataRecv(mesh::Packet*, uint8_t, const GroupChannel&, uint8_t*, size_t) override {
     groups++;
+  }
+};
+
+// Endpoint that answers an incoming request with a locally generated reply.
+// Used to verify which transport envelope ShadowNode picks for that reply.
+class ReplyTestMesh : public TestMesh {
+public:
+  uint8_t peer_secret[PUB_KEY_SIZE];
+  mesh::Identity reply_dest;
+  uint8_t reply_path[1] = { 0 };
+  uint8_t reply_type = PAYLOAD_TYPE_RESPONSE;
+  int replies = 0;
+
+  ReplyTestMesh(TestRadio& radio, TestClock& clock, TestRng& rng, TestRtc& rtc,
+                TestPacketManager& mgr, SimpleMeshTables& tables)
+    : TestMesh(radio, clock, rng, rtc, mgr, tables) {
+    memset(peer_secret, 0x5A, sizeof(peer_secret));
+  }
+
+  int searchPeersByHash(const uint8_t*) override { return 1; }
+
+  void getPeerSharedSecret(uint8_t* dest_secret, int) override {
+    memcpy(dest_secret, peer_secret, PUB_KEY_SIZE);
+  }
+
+  void onPeerDataRecv(mesh::Packet*, uint8_t type, int, const uint8_t* secret,
+                      uint8_t*, size_t) override {
+    if (type == PAYLOAD_TYPE_REQ || type == PAYLOAD_TYPE_TXT_MSG) {
+      sendReply(secret);
+    }
+  }
+
+  void onAnonDataRecv(mesh::Packet*, const uint8_t* secret,
+                      const mesh::Identity&, uint8_t*, size_t) override {
+    sendReply(secret);
+  }
+
+private:
+  void sendReply(const uint8_t* secret) {
+    uint8_t data[4] = { 0x42, 0x43, 0x44, 0x45 };
+    mesh::Packet* reply = createDatagram(reply_type, reply_dest, secret, data, sizeof(data));
+    if (reply != NULL) {
+      sendDirect(reply, reply_path, 0);
+      replies++;
+    }
   }
 };
 
@@ -1925,6 +1974,303 @@ TEST(ShadowAuth, AdvertPathModeMutationStillAccepted) {
   // outer shadow signature (and therefore path mode) is not checked.
   EXPECT_FALSE(auth.filter(mesh, &p));
   EXPECT_TRUE(p.auth_ok);
+}
+
+static void setTestPubKey(TestMesh& mesh, uint8_t base) {
+  for (int i = 0; i < PUB_KEY_SIZE; i++) mesh.self_id.pub_key[i] = (uint8_t)(base + i);
+}
+
+TEST(ShadowNode, TxDisabledStillUnwrapsIncomingEnvelope) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode tx(sender.self_id, rng);
+  tx.setEnabled(true);
+  sender.setShadowSendHook(&tx);
+
+  SimpleMeshTables rx_tables;
+  TestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  setTestPubKey(rx, 0xA0);
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(false);       // shd.enabled off on a companion ...
+  rx_node.setRxEnabled(true);      // ... but RX stays available
+  rx_node.setUnwrapAll(true);
+  rx.setShadowRecvHook(&rx_node);
+
+  uint8_t secret[PUB_KEY_SIZE];
+  memset(secret, 0x33, sizeof(secret));
+  uint8_t data[4] = { 1, 2, 3, 4 };
+  Packet* inner = sender.createDatagram(PAYLOAD_TYPE_RESPONSE, rx.self_id, secret, data, sizeof(data));
+  ASSERT_NE(inner, nullptr);
+  uint8_t path[1] = { 0 };
+  sender.sendDirect(inner, path, 0);
+
+  Packet* out = mgr.getNextOutbound(100000);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+
+  Packet p;
+  copyRaw(out, &p);
+  rx.recv(&p);
+
+  EXPECT_EQ(p.getPayloadType(), PAYLOAD_TYPE_RESPONSE);
+  EXPECT_FALSE(p.shadow);
+  EXPECT_TRUE(p.shadow_unwrapped);
+}
+
+TEST(ShadowNode, TxDisabledDoesNotWrapOutgoingPacket) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(false);
+  node.setRxEnabled(true);
+  mesh.setShadowSendHook(&node);
+
+  uint8_t secret[PUB_KEY_SIZE];
+  memset(secret, 0x44, sizeof(secret));
+  Identity dest;
+  memset(dest.pub_key, 0x77, sizeof(dest.pub_key));
+  uint8_t data[4] = { 5, 6, 7, 8 };
+  Packet* inner = mesh.createDatagram(PAYLOAD_TYPE_RESPONSE, dest, secret, data, sizeof(data));
+  ASSERT_NE(inner, nullptr);
+  uint8_t path[1] = { 0 };
+  mesh.sendDirect(inner, path, 0);
+
+  Packet* out = mgr.getNextOutbound(100000);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_RESPONSE);
+  EXPECT_FALSE(out->shadow_wrapped);
+}
+
+TEST(ShadowNode, ReplyToPlainRequestIsPlain) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+
+  SimpleMeshTables rx_tables;
+  ReplyTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  setTestPubKey(rx, 0xA0);
+  rx.reply_dest = sender.self_id;
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(false);
+  rx.setShadowSendHook(&rx_node);
+  rx.setShadowRecvHook(&rx_node);
+
+  uint8_t secret[PUB_KEY_SIZE];
+  memset(secret, 0x5A, sizeof(secret));
+  uint8_t data[4] = { 0x10, 0x11, 0x12, 0x13 };
+  Packet* req = sender.createDatagram(PAYLOAD_TYPE_REQ, rx.self_id, secret, data, sizeof(data));
+  ASSERT_NE(req, nullptr);
+  uint8_t path[1] = { 0 };
+  sender.sendDirect(req, path, 0);
+
+  Packet* out = mgr.getNextOutbound(100000);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_REQ);
+
+  Packet p;
+  copyRaw(out, &p);
+  rx.recv(&p);
+  EXPECT_EQ(rx.replies, 1);
+
+  Packet* reply = mgr.getNextOutbound(100000);
+  ASSERT_NE(reply, nullptr);
+  EXPECT_EQ(reply->getPayloadType(), PAYLOAD_TYPE_RESPONSE);
+  EXPECT_FALSE(reply->shadow_wrapped);
+}
+
+TEST(ShadowNode, ReplyToWrappedRequestIsWrapped) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode tx(sender.self_id, rng);
+  tx.setEnabled(true);
+  sender.setShadowSendHook(&tx);
+
+  SimpleMeshTables rx_tables;
+  ReplyTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  setTestPubKey(rx, 0xA0);
+  rx.reply_dest = sender.self_id;
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(false);
+  rx.setShadowSendHook(&rx_node);
+  rx.setShadowRecvHook(&rx_node);
+
+  uint8_t secret[PUB_KEY_SIZE];
+  memset(secret, 0x5A, sizeof(secret));
+  uint8_t data[4] = { 0x20, 0x21, 0x22, 0x23 };
+  Packet* req = sender.createDatagram(PAYLOAD_TYPE_REQ, rx.self_id, secret, data, sizeof(data));
+  ASSERT_NE(req, nullptr);
+  uint8_t path[1] = { 0 };
+  sender.sendDirect(req, path, 0);
+
+  Packet* out = mgr.getNextOutbound(100000);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+  EXPECT_TRUE(Mesh::isShadowPacket(out));
+
+  Packet p;
+  copyRaw(out, &p);
+  rx.recv(&p);
+  EXPECT_EQ(rx.replies, 1);
+
+  Packet* reply = mgr.getNextOutbound(100000);
+  ASSERT_NE(reply, nullptr);
+  EXPECT_EQ(reply->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+  EXPECT_TRUE(reply->shadow_wrapped);
+  ASSERT_GT(reply->payload_len, SHADOW_COMMON_SIZE);
+  EXPECT_EQ(reply->payload[SHADOW_COMMON_SIZE], PAYLOAD_TYPE_RESPONSE);
+}
+
+TEST(ShadowNode, LoginReplyStaysWrapped) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+
+  SimpleMeshTables rx_tables;
+  ReplyTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  setTestPubKey(rx, 0xA0);
+  rx.reply_dest = sender.self_id;
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(false);
+  rx.setShadowSendHook(&rx_node);
+  rx.setShadowRecvHook(&rx_node);
+
+  uint8_t secret[PUB_KEY_SIZE];
+  sender.self_id.calcSharedSecret(secret, rx.self_id);
+  uint8_t data[4] = { 0x30, 0x31, 0x32, 0x33 };
+  Packet* req = sender.createAnonDatagram(PAYLOAD_TYPE_ANON_REQ, sender.self_id, rx.self_id,
+                                          secret, data, sizeof(data));
+  ASSERT_NE(req, nullptr);
+  uint8_t path[1] = { 0 };
+  sender.sendDirect(req, path, 0);
+
+  Packet* out = mgr.getNextOutbound(100000);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_ANON_REQ);
+
+  Packet p;
+  copyRaw(out, &p);
+  rx.recv(&p);
+  EXPECT_EQ(rx.replies, 1);
+
+  Packet* reply = mgr.getNextOutbound(100000);
+  ASSERT_NE(reply, nullptr);
+  EXPECT_EQ(reply->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+  EXPECT_TRUE(reply->shadow_wrapped);
+}
+
+TEST(ShadowNode, UnsolicitedResponseIsStillWrapped) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+  mesh.setShadowSendHook(&node);
+
+  uint8_t secret[PUB_KEY_SIZE];
+  memset(secret, 0x66, sizeof(secret));
+  Identity dest;
+  memset(dest.pub_key, 0x88, sizeof(dest.pub_key));
+  uint8_t data[4] = { 0x40, 0x41, 0x42, 0x43 };
+  Packet* inner = mesh.createDatagram(PAYLOAD_TYPE_RESPONSE, dest, secret, data, sizeof(data));
+  ASSERT_NE(inner, nullptr);
+  uint8_t path[1] = { 0 };
+  mesh.sendDirect(inner, path, 0);
+
+  Packet* out = mgr.getNextOutbound(100000);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+  EXPECT_TRUE(out->shadow_wrapped);
+}
+
+TEST(ShadowNode, ReplyToPlainTxtMsgIsPlain) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+
+  SimpleMeshTables rx_tables;
+  ReplyTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  setTestPubKey(rx, 0xA0);
+  rx.reply_dest = sender.self_id;
+  rx.reply_type = PAYLOAD_TYPE_TXT_MSG;
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(false);
+  rx.setShadowSendHook(&rx_node);
+  rx.setShadowRecvHook(&rx_node);
+
+  uint8_t secret[PUB_KEY_SIZE];
+  memset(secret, 0x5A, sizeof(secret));
+  uint8_t data[4] = { 0x50, 0x51, 0x52, 0x53 };
+  Packet* req = sender.createDatagram(PAYLOAD_TYPE_TXT_MSG, rx.self_id, secret, data, sizeof(data));
+  ASSERT_NE(req, nullptr);
+  uint8_t path[1] = { 0 };
+  sender.sendDirect(req, path, 0);
+
+  Packet* out = mgr.getNextOutbound(100000);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_TXT_MSG);
+
+  Packet p;
+  copyRaw(out, &p);
+  rx.recv(&p);
+  EXPECT_EQ(rx.replies, 1);
+
+  Packet* reply = mgr.getNextOutbound(100000);
+  ASSERT_NE(reply, nullptr);
+  EXPECT_EQ(reply->getPayloadType(), PAYLOAD_TYPE_TXT_MSG);
+  EXPECT_FALSE(reply->shadow_wrapped);
+}
+
+TEST(ShadowNode, LocalOnlyShadowRequestReplyIsWrapped) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+
+  SimpleMeshTables rx_tables;
+  ReplyTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  setTestPubKey(rx, 0xA0);
+  rx.reply_dest = sender.self_id;
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(true);
+  rx.setShadowSendHook(&rx_node);
+  rx.setShadowRecvHook(&rx_node);
+
+  uint8_t secret[PUB_KEY_SIZE];
+  memset(secret, 0x5A, sizeof(secret));
+  uint8_t data[4] = { 0x60, 0x61, 0x62, 0x63 };
+  Packet* req = sender.createDatagram(PAYLOAD_TYPE_REQ, rx.self_id, secret, data, sizeof(data));
+  ASSERT_NE(req, nullptr);
+  uint8_t path[1] = { 0 };
+  sender.sendDirect(req, path, 0);
+
+  Packet* out = mgr.getNextOutbound(100000);
+  ASSERT_NE(out, nullptr);
+  Packet p;
+  copyRaw(out, &p);
+  p.local_only = true;          // reassembled shadow payload is delivered locally
+  p.shadow_unwrapped = true;
+
+  rx.recv(&p);
+  EXPECT_EQ(rx.replies, 1);
+
+  Packet* reply = mgr.getNextOutbound(100000);
+  ASSERT_NE(reply, nullptr);
+  EXPECT_EQ(reply->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+  EXPECT_TRUE(reply->shadow_wrapped);
+}
+
+TEST(ShadowNode, StatusAndCliSeparateTxFromRx) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+
+  char reply[160];
+  ASSERT_TRUE(node.handleCommand("shd.enabled off", reply, sizeof(reply)));
+  EXPECT_FALSE(node.enabled());
+  EXPECT_TRUE(node.rxEnabled());
+
+  node.formatStatus(reply, sizeof(reply));
+  EXPECT_NE(strstr(reply, "enabled=0 rx=1"), nullptr);
 }
 
 int main(int argc, char** argv) {

@@ -1010,6 +1010,10 @@ void MyMesh::begin() {
   // load persisted prefs
   _store->loadPrefs(_prefs);
   shadow_node.setEnabled(_prefs.shd_enabled != 0);
+  // RX is a firmware capability, not a send policy: a companion with shadow
+  // disabled must still be able to read wrapped replies/adverts/messages from
+  // shadow-enabled peers. shd.enabled only controls our own outgoing wrapping.
+  shadow_node.setRxEnabled(true);
   shadow_node.setMode(shadowPrefToMode(_prefs.shd_mode));
   shadow_node.setForwardEnvelopes(_prefs.isRepeatEn());
   sensors.node_lat = _prefs.node_lat;

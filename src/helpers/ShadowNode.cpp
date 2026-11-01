@@ -5,9 +5,36 @@
 #include <string.h>
 #include <SHA256.h>
 
+namespace {
+
+/**
+ * Payload types that can be a locally generated reply to a received packet.
+ * Replies mirror the envelope of their triggering request: a legacy or
+ * shadow-off peer sent a plain request and cannot unwrap a shadow reply.
+ * MULTIPART is gated only for ACK sequences; an app-initiated multipart
+ * message is not a reply.
+ */
+bool isReplyPayload(const mesh::Packet* packet) {
+  switch (packet->getPayloadType()) {
+    case PAYLOAD_TYPE_RESPONSE:
+    case PAYLOAD_TYPE_ACK:
+    case PAYLOAD_TYPE_PATH:
+    case PAYLOAD_TYPE_TXT_MSG:
+      return true;
+    case PAYLOAD_TYPE_MULTIPART:
+      return packet->payload_len > 0
+          && (packet->payload[0] & 0x0F) == PAYLOAD_TYPE_ACK;
+    default:
+      return false;
+  }
+}
+
+} // namespace
+
 ShadowNode::ShadowNode(mesh::LocalIdentity& self, mesh::RNG& rng)
-  : _self(self), _rng(rng), _enabled(true), _mode(SHADOW_MODE_AUTO), _unwrap_all(true),
-    _forward_envelopes(false), _sig_id(0), _frag_id(0), _frag_ttl_ms(SHADOW_FRAG_TTL_DEFAULT_MS),
+  : _self(self), _rng(rng), _tx_enabled(true), _rx_enabled(true), _mode(SHADOW_MODE_AUTO),
+    _unwrap_all(true), _forward_envelopes(false), _sig_id(0), _frag_id(0),
+    _frag_ttl_ms(SHADOW_FRAG_TTL_DEFAULT_MS),
     _scope_valid(false), _saved_valid(false), _saved_header(0), _saved_payload_len(0),
     _saved_flags(0), _saved_auth_ok(false),
     _sent(0), _recv(0), _frags_recv(0), _dropped(0) {
@@ -313,7 +340,7 @@ bool ShadowNode::wrapFragment(mesh::Mesh& mesh, mesh::Packet* packet,
 
 bool ShadowNode::wrapAndSend(mesh::Mesh& mesh, mesh::Packet* packet,
                              uint8_t priority, uint32_t delay_millis) {
-  if (!_enabled) {
+  if (!_tx_enabled) {
     SHADOW_TRACE_PRINTLN("SHADOW TX SKIP reason=disabled type=%d len=%d",
                          packet->getPayloadType(), packet->payload_len);
     return false;
@@ -321,6 +348,18 @@ bool ShadowNode::wrapAndSend(mesh::Mesh& mesh, mesh::Packet* packet,
   if (!shouldWrap(packet)) {
     SHADOW_TRACE_PRINTLN("SHADOW TX SKIP reason=not-wrappable type=%d len=%d",
                          packet->getPayloadType(), packet->payload_len);
+    return false;
+  }
+
+  // A locally generated reply mirrors the transport envelope of the request
+  // that triggered it. A plain request comes from a legacy or shadow-off peer
+  // that cannot unwrap a shadow reply. ANON_REQ login is the exception: its
+  // reply stays wrapped so it can traverse enforcing repeaters.
+  if (isReplyPayload(packet) && mesh.recvDispatchActive()
+      && mesh.recvDispatchType() != PAYLOAD_TYPE_ANON_REQ
+      && !mesh.recvDispatchWasShadow()) {
+    SHADOW_TRACE_PRINTLN("SHADOW TX SKIP reason=reply-to-plain type=%d recv_type=%d",
+                         packet->getPayloadType(), mesh.recvDispatchType());
     return false;
   }
 
@@ -403,6 +442,7 @@ void ShadowNode::prepareForward(mesh::Packet* packet) {
   packet->shadow_wrapped = true;
   packet->shadow_flags = _saved_flags;
   packet->auth_ok = _saved_auth_ok;
+  packet->shadow_unwrapped = false;
   _saved_valid = false;
 }
 
@@ -421,6 +461,7 @@ bool ShadowNode::unwrapLocal(mesh::Packet* packet, uint8_t inner_type,
   packet->shadow_wrapped = false;
   packet->auth_ok = false;
   packet->shadow_flags = 0;
+  packet->shadow_unwrapped = true;
   _recv++;
   MESH_DEBUG_PRINTLN("SHADOW RX UNWRAP OK mode=%s type=%d len=%u",
                      shadow::modeName(mode), inner_type, (unsigned)inner_len);
@@ -550,6 +591,7 @@ bool ShadowNode::processFragment(mesh::Mesh& mesh, mesh::Packet* packet, const u
     packet->shadow_wrapped = false;
     packet->auth_ok = false;
     packet->shadow_flags = 0;
+    packet->shadow_unwrapped = true;
     e.used = false;
     _frags_recv++;
     _recv++;
@@ -564,7 +606,7 @@ bool ShadowNode::processFragment(mesh::Mesh& mesh, mesh::Packet* packet, const u
 
 bool ShadowNode::unwrapAndProcess(mesh::Mesh& mesh, mesh::Packet* packet) {
   _saved_valid = false;   // only valid for the packet currently being processed
-  if (!_enabled) return false;
+  if (!_rx_enabled) return false;
   if (!shadow::hasShadowMarker(packet)) return false;
 
   uint8_t tag[SHADOW_TAG_SIZE];
@@ -735,10 +777,10 @@ void ShadowNode::formatStatus(char* reply, size_t reply_len) const {
   for (int i = 0; i < SHADOW_FRAG_MAX; i++) if (_frags[i].used) frags++;
 
   snprintf(reply, reply_len,
-           "enabled=%d mode=%s frag=%d/%d\n"
+           "enabled=%d rx=%d mode=%s frag=%d/%d\n"
            "sig_id=%lu frag_id=%lu\n"
            "sent=%lu recv=%lu frags=%lu dropped=%lu",
-           (int)_enabled, mode_name, frags, SHADOW_FRAG_MAX,
+           (int)_tx_enabled, (int)_rx_enabled, mode_name, frags, SHADOW_FRAG_MAX,
            (unsigned long)_sig_id, (unsigned long)_frag_id,
            (unsigned long)_sent, (unsigned long)_recv,
            (unsigned long)_frags_recv, (unsigned long)_dropped);
@@ -771,7 +813,7 @@ bool ShadowNode::handleCommand(const char* command, char* reply, size_t reply_le
   bool b;
   if (strcmp(name, "shd.enabled") == 0) {
     if (!parseOnOff(args, &b)) { snprintf(reply, reply_len, "Err - on|off"); return true; }
-    _enabled = b;
+    _tx_enabled = b;
     MESH_DEBUG_PRINTLN("shd.enabled -> %s", b ? "on" : "off");
     snprintf(reply, reply_len, "OK - shadow %s", b ? "enabled" : "disabled");
     return true;
