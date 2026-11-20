@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include "Stream.h"
 
 // Minimal filesystem type for headers that only need the FILESYSTEM typedef
@@ -40,6 +41,11 @@ inline char* ltoa(long value, char* dest, int base) {
 }
 
 using std::isnan;
+
+template <typename T>
+inline T constrain(T value, T low, T high) {
+  return value < low ? low : (value > high ? high : value);
+}
 
 inline uint32_t millis() {
   return g_mock_millis;

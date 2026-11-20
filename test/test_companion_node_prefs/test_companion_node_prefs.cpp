@@ -46,6 +46,11 @@ public:
   size_t print(unsigned long value, int = DEC) override { return emit(value); }
   size_t print(long long value, int = DEC) override { return emit(value); }
   size_t print(unsigned long long value, int = DEC) override { return emit(value); }
+  size_t print(double value, int places = 2) override {
+    char text[32];
+    int length = snprintf(text, sizeof(text), "%.*f", places, value);
+    return write(reinterpret_cast<const uint8_t*>(text), length);
+  }
 
   const std::string& text() const { return _text; }
 };
@@ -76,6 +81,33 @@ TEST(CompanionNodePrefs, RxGainSettingsRoundTripIndependently) {
   EXPECT_EQ(1, loaded.radio_fem_txgain);
 }
 #endif
+
+// ConfigSerializer keys accept only [A-Za-z0-9_]. A '.' aborts loadSerial()
+// and silently freezes every setting after it (custom board prefs, wifi), so
+// shadow settings must be persisted with underscore keys.
+TEST(CompanionNodePrefs, ShadowSettingsRoundTrip) {
+  NodePrefs saved;
+  saved.shd_enabled = 0;
+  saved.shd_mode = 3;
+  ASSERT_TRUE(saved.getCustom()->setByKey("test_key", "42"));
+
+  CaptureStream output;
+  ASSERT_TRUE(saved.saveSerial(output));
+  EXPECT_EQ(std::string::npos, output.text().find("shd."));
+  EXPECT_NE(std::string::npos, output.text().find("shd_enabled:0"));
+  EXPECT_NE(std::string::npos, output.text().find("shd_mode:3"));
+
+  NodePrefs loaded;
+  ReplayStream input(output.text().c_str());
+  ASSERT_TRUE(loaded.loadSerial(input));
+  EXPECT_EQ(0, loaded.shd_enabled);
+  EXPECT_EQ(3, loaded.shd_mode);
+
+  // Keys serialized after "comp" (custom board prefs) must still load.
+  char value[16] = {0};
+  ASSERT_TRUE(loaded.getCustom()->getByKey("test_key", value, sizeof(value) - 1));
+  EXPECT_STREQ("42", value);
+}
 
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);

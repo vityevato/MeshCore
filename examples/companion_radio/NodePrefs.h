@@ -169,8 +169,8 @@ private:
       def("tel_loc", _parent->telemetry_mode_loc);
       def("tel_env", _parent->telemetry_mode_env);
       def("tz_offset", _parent->tz_offset);
-      def("shd.enabled", _parent->shd_enabled);
-      def("shd.mode", _parent->shd_mode);
+      def("shd_enabled", _parent->shd_enabled);
+      def("shd_mode", _parent->shd_mode);
     }
   public:
     CompanionPrefs(NodePrefs* parent) : _parent(parent) { }
