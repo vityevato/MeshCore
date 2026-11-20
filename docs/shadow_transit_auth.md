@@ -55,7 +55,10 @@ With `shd.enabled on` and `shd.enforce on` a repeater:
 - allows `ADVERT` only from allowlisted keys by default, for both ordinary and
   shadow-wrapped adverts; with `shd.allow.advert on` all valid signed adverts
   are allowed, rate-limited;
-- allows zero-hop `CONTROL`;
+- requires a shadow envelope for zero-hop `CONTROL` (discovery): ordinary
+  `CONTROL` is dropped when enforcing, and only wrapped CONTROL from
+  allowlisted keys is processed. With `shd.enforce off` ordinary CONTROL still
+  passes for compatibility;
 - drops ordinary ACKs.
 
 The early filter runs in `Dispatcher::checkRecv()` before `queueInbound()`, so
@@ -66,8 +69,8 @@ unauthorized floods do not consume the packet pool or the delayed queue.
 Locally generated replies mirror the transport envelope of the request that
 triggered them:
 
-- a shadow-wrapped request gets a shadow-wrapped `RESPONSE`, `ACK`, `PATH` or
-  `TXT_MSG` reply;
+- a shadow-wrapped request gets a shadow-wrapped `RESPONSE`, `ACK`, `PATH`,
+  `TXT_MSG` or `CONTROL` reply;
 - an ordinary request gets an ordinary reply, so legacy and shadow-off clients
   keep working while `shd.enforce` is off;
 - `ANON_REQ` login is the exception: its reply stays wrapped, because the login
@@ -76,6 +79,10 @@ triggered them:
   telemetry and CLI commands against a shadow-enabled repeater, but cannot
   complete login; add it to the repeater ACL with `setperm` if needed;
 - unsolicited locally generated packets keep the normal `shd.enabled` behavior.
+
+`CONTROL` replies are zero-hop discovery responses. A discovery request is
+wrapped like any other outgoing CONTROL packet, so under enforcement only
+allowlisted shadow-capable nodes get a response.
 
 ### Detached messages
 
@@ -238,6 +245,11 @@ Both are compile-time flags; release builds have the logs compiled out.
 Per-packet logging is synchronous and can affect timing on a busy repeater,
 so use it for active debugging rather than long unattended runs.
 
+CONTROL-specific drop reasons are `control-requires-shadow`, `control-short`
+and `control-transit`. Per-packet traces include the CONTROL discovery subtype
+(`ctl=80` request, `ctl=90` response). Repeater discovery decisions are logged
+as `DISCOVER ...` lines: request/response, ignore reason and response sent.
+
 ## 160-byte text
 
 A 160-byte chat message produces an inner payload of about 180 bytes, which is
@@ -319,6 +331,12 @@ application must generate and parse shadow envelopes itself.
   request. Login replies stay wrapped, so a client without shadow support
   cannot log in to a shadow-enabled repeater; add it to the repeater ACL with
   `setperm` instead.
+- Under `shd.enforce on`, unknown nodes cannot discover a shadow-enabled
+  repeater via zero-hop `CONTROL`: ordinary discovery requests are dropped,
+  and only allowlisted shadow-capable nodes get a response. `discover.neighbors`
+  between repeaters therefore requires mutual allowlisting. Legacy repeaters,
+  the Sensor firmware and other non-shadow roles cannot take part in shadow
+  discovery; with `shd.enforce off`, ordinary CONTROL discovery still works.
 - Scoped flood support is implemented: the outer transport code is computed
   after the shadow signature, over the final wire packet, so it matches the
   standard `TransportKey::calcTransportCode()` used by legacy region-aware

@@ -841,6 +841,11 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
   memcpy(&out_frame[i], packet->payload, packet->payload_len);
   i += packet->payload_len;
 
+  MESH_DEBUG_PRINTLN("CONTROL RX type=%02X len=%u snr=%d rssi=%d",
+                     (unsigned)(packet->payload_len > 0 ? (packet->payload[0] & 0xF0) : 0),
+                     (unsigned)packet->payload_len,
+                     (int)(int8_t)out_frame[1], (int)(int8_t)out_frame[2]);
+
   if (_serial->isConnected()) {
     _serial->writeFrame(out_frame, i);
   } else {

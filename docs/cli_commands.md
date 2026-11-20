@@ -128,6 +128,10 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 **Usage:** 
 - `discover.neighbors`
 
+**Note:** With `shd.enforce on`, discovery requests are shadow-wrapped and only
+allowlisted shadow-capable neighbors respond; legacy nodes are not
+discoverable. With `shd.enforce off`, ordinary zero-hop discovery still works.
+
 ---
 
 ## Statistics
@@ -780,6 +784,8 @@ wrapped so they can traverse enforcing repeaters.
 - `shd.enforce on|off`
 
 When `off`, the repeater verifies and counts but still forwards everything.
+When `on`, zero-hop `CONTROL` discovery also requires a shadow envelope: only
+allowlisted shadow-capable nodes get a discovery response.
 **Default:** `off`
 
 ---

@@ -806,12 +806,9 @@ bool ShadowAuth::filterOrdinary(mesh::Mesh& mesh, mesh::Packet* pkt, unsigned lo
   }
 
   if (type == PAYLOAD_TYPE_CONTROL) {
-    if (pkt->isRouteDirect() && pkt->getPathHashCount() == 0) {
-      pkt->auth_ok = true;
-      SHADOW_TRACE_PRINTLN("SHADOW RX ACCEPT control len=%d", pkt->payload_len);
-      return false;
-    }
-    return drop("control-transit", pkt, NULL);
+    // Discovery is not exempt: under enforcement it must arrive as a signed
+    // shadow envelope, so unknown nodes cannot probe for repeaters.
+    return drop("control-requires-shadow", pkt, NULL);
   }
 
   // ACK and every other ordinary payload require a shadow envelope.

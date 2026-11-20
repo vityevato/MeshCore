@@ -807,10 +807,27 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t 
 
 void MyMesh::onControlDataRecv(mesh::Packet* packet) {
   uint8_t type = packet->payload[0] & 0xF0;    // just test upper 4 bits
-  if (type == CTL_TYPE_NODE_DISCOVER_REQ && packet->payload_len >= 6
-      && !_prefs.disable_fwd && discover_limiter.allow(rtc_clock.getCurrentTime())
-      && !isHiddenNode()   // this node wishes to NOT be discoverable
-  ) {
+  MESH_DEBUG_PRINTLN("DISCOVER RX type=%02X len=%u snr=%d",
+                     (unsigned)type, (unsigned)packet->payload_len, (int)packet->_snr);
+
+  if (type == CTL_TYPE_NODE_DISCOVER_REQ) {
+    if (packet->payload_len < 6) {
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=short len=%u", (unsigned)packet->payload_len);
+      return;
+    }
+    if (_prefs.disable_fwd) {
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=disabled");
+      return;
+    }
+    if (!discover_limiter.allow(rtc_clock.getCurrentTime())) {
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=rate");
+      return;
+    }
+    if (isHiddenNode()) {   // this node wishes to NOT be discoverable
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=hidden");
+      return;
+    }
+
     int i = 1;
     uint8_t  filter = packet->payload[i++];
     uint32_t tag;
@@ -822,42 +839,72 @@ void MyMesh::onControlDataRecv(mesh::Packet* packet) {
       since = 0;
     }
 
-    if ((filter & (1 << ADV_TYPE_REPEATER)) != 0 && _prefs.discovery_mod_timestamp >= since) {
-      bool prefix_only = packet->payload[0] & 1;
-      uint8_t data[6 + PUB_KEY_SIZE];
-      data[0] = CTL_TYPE_NODE_DISCOVER_RESP | ADV_TYPE_REPEATER;   // low 4-bits for node type
-      data[1] = packet->_snr;   // let sender know the inbound SNR ( x 4)
-      memcpy(&data[2], &tag, 4);     // include tag from request, for client to match to
-      memcpy(&data[6], self_id.pub_key, PUB_KEY_SIZE);
-      auto resp = createControlData(data, prefix_only ? 6 + 8 : 6 + PUB_KEY_SIZE);
-      if (resp) {
-        sendZeroHop(resp, getRetransmitDelay(resp)*4);  // apply random delay (widened x4), as multiple nodes can respond to this
-      }
+    MESH_DEBUG_PRINTLN("DISCOVER RX request tag=%08lX filter=%02X since=%lu snr=%d",
+                       (unsigned long)tag, (unsigned)filter, (unsigned long)since,
+                       (int)packet->_snr);
+
+    if ((filter & (1 << ADV_TYPE_REPEATER)) == 0) {
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=filter filter=%02X", (unsigned)filter);
+      return;
     }
-  } else if (type == CTL_TYPE_NODE_DISCOVER_RESP && packet->payload_len >= 6) {
+    if (_prefs.discovery_mod_timestamp < since) {
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=since since=%lu have=%lu",
+                         (unsigned long)since,
+                         (unsigned long)_prefs.discovery_mod_timestamp);
+      return;
+    }
+
+    bool prefix_only = packet->payload[0] & 1;
+    uint8_t data[6 + PUB_KEY_SIZE];
+    data[0] = CTL_TYPE_NODE_DISCOVER_RESP | ADV_TYPE_REPEATER;   // low 4-bits for node type
+    data[1] = packet->_snr;   // let sender know the inbound SNR ( x 4)
+    memcpy(&data[2], &tag, 4);     // include tag from request, for client to match to
+    memcpy(&data[6], self_id.pub_key, PUB_KEY_SIZE);
+    auto resp = createControlData(data, prefix_only ? 6 + 8 : 6 + PUB_KEY_SIZE);
+    if (resp) {
+      MESH_DEBUG_PRINTLN("DISCOVER TX response tag=%08lX prefix_only=%d",
+                         (unsigned long)tag, (int)prefix_only);
+      sendZeroHop(resp, getRetransmitDelay(resp)*4);  // apply random delay (widened x4), as multiple nodes can respond to this
+    } else {
+      MESH_DEBUG_PRINTLN("DISCOVER TX FAIL reason=alloc tag=%08lX", (unsigned long)tag);
+    }
+  } else if (type == CTL_TYPE_NODE_DISCOVER_RESP) {
+    if (packet->payload_len < 6) {
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=short len=%u", (unsigned)packet->payload_len);
+      return;
+    }
     uint8_t node_type = packet->payload[0] & 0x0F;
+    MESH_DEBUG_PRINTLN("DISCOVER RX response node_type=%d len=%u",
+                       (int)node_type, (unsigned)packet->payload_len);
     if (node_type != ADV_TYPE_REPEATER) {
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=node-type node_type=%d", (int)node_type);
       return;
     }
     if (packet->payload_len < 6 + PUB_KEY_SIZE) {
-      MESH_DEBUG_PRINTLN("onControlDataRecv: DISCOVER_RESP pubkey too short: %d", (uint32_t)packet->payload_len);
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=short-pubkey len=%u",
+                         (unsigned)packet->payload_len);
       return;
     }
 
     if (pending_discover_tag == 0 || millisHasNowPassed(pending_discover_until)) {
       pending_discover_tag = 0;
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=no-pending");
       return;
     }
     uint32_t tag;
     memcpy(&tag, &packet->payload[2], 4);
     if (tag != pending_discover_tag) {
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=tag tag=%08lX pending=%08lX",
+                         (unsigned long)tag, (unsigned long)pending_discover_tag);
       return;
     }
 
     mesh::Identity id(&packet->payload[6]);
     if (id.matches(self_id)) {
+      MESH_DEBUG_PRINTLN("DISCOVER IGNORE reason=self");
       return;
     }
+    MESH_DEBUG_PRINTLN("DISCOVER ACCEPT neighbour tag=%08lX", (unsigned long)tag);
     putNeighbour(id, rtc_clock.getCurrentTime(), packet->getSNR());
   }
 }

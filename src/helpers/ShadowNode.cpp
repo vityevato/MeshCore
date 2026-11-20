@@ -11,8 +11,8 @@ namespace {
  * Payload types that can be a locally generated reply to a received packet.
  * Replies mirror the envelope of their triggering request: a legacy or
  * shadow-off peer sent a plain request and cannot unwrap a shadow reply.
- * MULTIPART is gated only for ACK sequences; an app-initiated multipart
- * message is not a reply.
+ * CONTROL covers zero-hop discovery responses. MULTIPART is gated only for
+ * ACK sequences; an app-initiated multipart message is not a reply.
  */
 bool isReplyPayload(const mesh::Packet* packet) {
   switch (packet->getPayloadType()) {
@@ -20,6 +20,7 @@ bool isReplyPayload(const mesh::Packet* packet) {
     case PAYLOAD_TYPE_ACK:
     case PAYLOAD_TYPE_PATH:
     case PAYLOAD_TYPE_TXT_MSG:
+    case PAYLOAD_TYPE_CONTROL:
       return true;
     case PAYLOAD_TYPE_MULTIPART:
       return packet->payload_len > 0
@@ -114,11 +115,10 @@ void ShadowNode::nextFragId(uint8_t* dest) {
 bool ShadowNode::shouldWrap(const mesh::Packet* packet) const {
   if (packet->shadow_wrapped) return false;
   uint8_t type = packet->getPayloadType();
-  // These are the login exception (ANON_REQ) or have local zero-hop
-  // semantics (CONTROL / TRACE). ADVERT is wrapped: the inner advert keeps
-  // its own Ed25519 signature and is verified by Mesh after unwrapping.
-  if (type == PAYLOAD_TYPE_ANON_REQ
-      || type == PAYLOAD_TYPE_CONTROL || type == PAYLOAD_TYPE_TRACE) {
+  // ANON_REQ is the login exception and TRACE stays a local diagnostic.
+  // ADVERT and CONTROL are wrapped: an advert keeps its own signature, and
+  // zero-hop CONTROL discovery must be authenticated when enforcement is on.
+  if (type == PAYLOAD_TYPE_ANON_REQ || type == PAYLOAD_TYPE_TRACE) {
     return false;
   }
   return packet->payload_len <= MAX_PACKET_PAYLOAD;
@@ -358,8 +358,10 @@ bool ShadowNode::wrapAndSend(mesh::Mesh& mesh, mesh::Packet* packet,
   if (isReplyPayload(packet) && mesh.recvDispatchActive()
       && mesh.recvDispatchType() != PAYLOAD_TYPE_ANON_REQ
       && !mesh.recvDispatchWasShadow()) {
-    SHADOW_TRACE_PRINTLN("SHADOW TX SKIP reason=reply-to-plain type=%d recv_type=%d",
-                         packet->getPayloadType(), mesh.recvDispatchType());
+    SHADOW_TRACE_PRINTLN("SHADOW TX SKIP reason=reply-to-plain type=%d recv_type=%d ctl=%02X",
+                         packet->getPayloadType(), mesh.recvDispatchType(),
+                         (packet->getPayloadType() == PAYLOAD_TYPE_CONTROL && packet->payload_len > 0)
+                             ? (unsigned)(packet->payload[0] & 0xF0) : 0u);
     return false;
   }
 
@@ -368,8 +370,10 @@ bool ShadowNode::wrapAndSend(mesh::Mesh& mesh, mesh::Packet* packet,
 
   // Adverts are self-authenticating (their own Ed25519 signature lives in the
   // inner payload). Never fragment them: embedded or detached only, so any
-  // repeater can apply shd.allow.advert without reassembly.
-  if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT) {
+  // repeater can apply shd.allow.advert without reassembly. CONTROL discovery
+  // packets are also kept in one packet so repeaters never reassemble them.
+  if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT
+      || packet->getPayloadType() == PAYLOAD_TYPE_CONTROL) {
     mode = (inner_len <= SHADOW_MAX_INNER_EMBEDDED) ? SHADOW_MODE_EMBEDDED
                                                     : SHADOW_MODE_MESSAGE;
   } else if (_mode == SHADOW_MODE_EMBEDDED && inner_len <= SHADOW_MAX_INNER_EMBEDDED) {
@@ -386,9 +390,11 @@ bool ShadowNode::wrapAndSend(mesh::Mesh& mesh, mesh::Packet* packet,
     mode = SHADOW_MODE_FRAGMENT;
   }
 
-  SHADOW_TRACE_PRINTLN("SHADOW TX wrap type=%d inner_len=%u mode=%s",
-                       packet->getPayloadType(), (unsigned)inner_len,
-                       shadow::modeName(mode));
+  SHADOW_TRACE_PRINTLN("SHADOW TX wrap type=%d ctl=%02X inner_len=%u mode=%s",
+                       packet->getPayloadType(),
+                       (packet->getPayloadType() == PAYLOAD_TYPE_CONTROL && packet->payload_len > 0)
+                           ? (unsigned)(packet->payload[0] & 0xF0) : 0u,
+                       (unsigned)inner_len, shadow::modeName(mode));
 
   bool ok;
   if (mode == SHADOW_MODE_EMBEDDED) {
@@ -650,6 +656,13 @@ bool ShadowNode::unwrapAndProcess(mesh::Mesh& mesh, mesh::Packet* packet) {
     uint16_t frag_len = packet->payload_len - SHADOW_FRAG_OVERHEAD;
     const uint8_t* frag_payload = &packet->payload[SHADOW_COMMON_SIZE + SHADOW_SIG_ID_SIZE + 3];
 
+    // CONTROL is zero-hop only. Drop fragmented CONTROL that is not a
+    // zero-hop direct packet instead of letting it transit.
+    if (inner_type == PAYLOAD_TYPE_CONTROL
+        && (!packet->isRouteDirect() || packet->getPathHashCount() != 0)) {
+      return drop("control-transit", packet, tag);
+    }
+
     if (_forward_envelopes) {
       // Repeater-capable endpoint: keep and forward the original signed
       // fragment, while reassembling a copy for local delivery. The
@@ -717,6 +730,22 @@ bool ShadowNode::unwrapAndProcess(mesh::Mesh& mesh, mesh::Packet* packet) {
     MESH_DEBUG_PRINTLN("SHADOW RX UNWRAP advert tag=%02X%02X%02X inner_len=%u route=%c",
                        tag[0], tag[1], tag[2], (unsigned)inner_len,
                        packet->isRouteDirect() ? 'D' : 'F');
+    return unwrapLocal(packet, inner_type, inner, inner_len);
+  }
+
+  if (inner_type == PAYLOAD_TYPE_CONTROL) {
+    if (inner_len < 1) {
+      return drop("control-short", packet, tag);
+    }
+    // CONTROL is a zero-hop broadcast and has no destination hash. Unwrap it
+    // locally only when the envelope is a zero-hop direct packet; CONTROL is
+    // never allowed to transit.
+    if (!packet->isRouteDirect() || packet->getPathHashCount() != 0) {
+      return drop("control-transit", packet, tag);
+    }
+    SHADOW_TRACE_PRINTLN("SHADOW RX CONTROL tag=%02X%02X%02X ctl=%02X len=%u",
+                         tag[0], tag[1], tag[2], (unsigned)(inner[0] & 0xF0),
+                         (unsigned)inner_len);
     return unwrapLocal(packet, inner_type, inner, inner_len);
   }
 

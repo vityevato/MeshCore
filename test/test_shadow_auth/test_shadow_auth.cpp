@@ -233,6 +233,50 @@ private:
   }
 };
 
+// Zero-hop discovery endpoint used by the CONTROL shadow tests.
+class ControlTestMesh : public TestMesh {
+public:
+  int requests = 0;
+  int responses = 0;
+  bool reply = true;
+
+  ControlTestMesh(TestRadio& radio, TestClock& clock, TestRng& rng, TestRtc& rtc,
+                  TestPacketManager& mgr, SimpleMeshTables& tables)
+    : TestMesh(radio, clock, rng, rtc, mgr, tables) {}
+
+  void onControlDataRecv(mesh::Packet* packet) override {
+    if (packet->payload_len < 1) return;
+    uint8_t type = packet->payload[0] & 0xF0;
+    if (type == 0x80) {   // node discover request
+      requests++;
+      if (!reply || packet->payload_len < 6) return;
+      uint8_t data[7];
+      data[0] = 0x90;     // node discover response
+      data[1] = 0;        // SNR is informational
+      memcpy(&data[2], &packet->payload[2], 4);   // echo the tag
+      data[6] = 0xAA;     // pubkey prefix
+      mesh::Packet* resp = createControlData(data, sizeof(data));
+      if (resp != NULL) {
+        sendZeroHop(resp);
+        responses++;
+      }
+    } else if (type == 0x90) {
+      responses++;
+    }
+  }
+};
+
+static mesh::Packet* makeControlOutbound(TestMesh& mesh, TestPacketManager& mgr, uint8_t ctl_type) {
+  uint8_t data[6];
+  data[0] = ctl_type;
+  data[1] = 0xFF;   // discovery filter / SNR placeholder
+  for (int i = 0; i < 4; i++) data[2 + i] = (uint8_t)(0xA0 + i);   // tag
+  mesh::Packet* pkt = mesh.createControlData(data, sizeof(data));
+  if (pkt == NULL) return NULL;
+  mesh.sendZeroHop(pkt);
+  return mgr.getNextOutbound(100000);
+}
+
 static Packet* wrapOne(TestMesh& mesh, TestPacketManager& mgr, const uint8_t* payload, uint16_t len,
                        uint8_t type = PAYLOAD_TYPE_RAW_CUSTOM) {
   Packet* inner = mesh.createRawData(payload, len);
@@ -2271,6 +2315,243 @@ TEST(ShadowNode, StatusAndCliSeparateTxFromRx) {
 
   node.formatStatus(reply, sizeof(reply));
   EXPECT_NE(strstr(reply, "enabled=0 rx=1"), nullptr);
+}
+
+TEST(ShadowAuth, PlainControlDroppedWhenEnforcing) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+
+  Packet* out = makeControlOutbound(mesh, mgr, 0x80);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_CONTROL);
+
+  ShadowAuth auth;
+  auth.begin();
+  auth.getPrefs().enabled = 1;
+  auth.getPrefs().enforce = 1;
+
+  Packet p;
+  copyRaw(out, &p);
+  EXPECT_TRUE(auth.filter(mesh, &p));
+
+  char stats[96];
+  auth.formatStats(stats, sizeof(stats));
+  EXPECT_NE(strstr(stats, "drop=1"), nullptr);
+}
+
+TEST(ShadowAuth, PlainControlPassesWhenEnforceOff) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+
+  Packet* out = makeControlOutbound(mesh, mgr, 0x80);
+  ASSERT_NE(out, nullptr);
+
+  ShadowAuth auth;
+  auth.begin();
+  auth.getPrefs().enabled = 1;
+  auth.getPrefs().enforce = 0;
+
+  Packet p;
+  copyRaw(out, &p);
+  EXPECT_FALSE(auth.filter(mesh, &p));
+  EXPECT_FALSE(p.auth_ok);
+}
+
+TEST(ShadowAuth, WrappedControlAcceptedWhenEnforcing) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+  mesh.setShadowSendHook(&node);
+
+  ShadowAuth auth;
+  auth.begin();
+  auth.getPrefs().enabled = 1;
+  auth.getPrefs().enforce = 1;
+  ASSERT_TRUE(auth.allow(mesh.self_id.pub_key));
+
+  Packet* out = makeControlOutbound(mesh, mgr, 0x80);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+
+  Packet p;
+  copyRaw(out, &p);
+  EXPECT_FALSE(auth.filter(mesh, &p));
+  EXPECT_TRUE(p.auth_ok);
+}
+
+TEST(ShadowAuth, WrappedControlFromUnknownKeyDroppedWhenEnforcing) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+  mesh.setShadowSendHook(&node);
+
+  ShadowAuth auth;
+  auth.begin();
+  auth.getPrefs().enabled = 1;
+  auth.getPrefs().enforce = 1;
+
+  Packet* out = makeControlOutbound(mesh, mgr, 0x80);
+  ASSERT_NE(out, nullptr);
+
+  Packet p;
+  copyRaw(out, &p);
+  EXPECT_TRUE(auth.filter(mesh, &p));
+}
+
+TEST(ShadowNode, WrapsZeroHopControl) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+  mesh.setShadowSendHook(&node);
+
+  Packet* out = makeControlOutbound(mesh, mgr, 0x80);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+  EXPECT_TRUE(out->shadow_wrapped);
+  EXPECT_TRUE(out->isRouteDirect());
+  EXPECT_EQ(out->getPathHashCount(), 0);
+  ASSERT_GT(out->payload_len, SHADOW_COMMON_SIZE);
+  EXPECT_EQ(out->payload[SHADOW_COMMON_SIZE], PAYLOAD_TYPE_CONTROL);
+  EXPECT_EQ(shadow::modeOf(out->shadow_flags), SHADOW_MODE_EMBEDDED);
+}
+
+TEST(ShadowNode, ControlNeverFragments) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode node(mesh.self_id, rng);
+  node.setEnabled(true);
+  node.setMode(SHADOW_MODE_FRAGMENT);
+  mesh.setShadowSendHook(&node);
+
+  Packet* out = makeControlOutbound(mesh, mgr, 0x80);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+  EXPECT_EQ(shadow::modeOf(out->shadow_flags), SHADOW_MODE_EMBEDDED);
+  EXPECT_EQ(mgr.getNextOutbound(100000), nullptr);   // not fragmented into more packets
+}
+
+TEST(ShadowNode, RepeaterUnwrapsZeroHopControl) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode tx(sender.self_id, rng);
+  tx.setEnabled(true);
+  sender.setShadowSendHook(&tx);
+
+  SimpleMeshTables rx_tables;
+  ControlTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  setTestPubKey(rx, 0xA0);
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(false);
+  rx.reply = false;
+  rx.setShadowSendHook(&rx_node);
+  rx.setShadowRecvHook(&rx_node);
+
+  Packet* out = makeControlOutbound(sender, mgr, 0x80);
+  ASSERT_NE(out, nullptr);
+  EXPECT_EQ(out->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+
+  Packet p;
+  copyRaw(out, &p);
+  rx.recv(&p);
+
+  EXPECT_EQ(rx.requests, 1);
+  EXPECT_EQ(p.getPayloadType(), PAYLOAD_TYPE_CONTROL);
+  EXPECT_TRUE(p.shadow_unwrapped);
+}
+
+TEST(ShadowNode, PlainControlReplyMirrorsPlainRequest) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+
+  SimpleMeshTables rx_tables;
+  ControlTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  setTestPubKey(rx, 0xA0);
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(false);
+  rx.setShadowSendHook(&rx_node);
+  rx.setShadowRecvHook(&rx_node);
+
+  Packet* req = makeControlOutbound(sender, mgr, 0x80);
+  ASSERT_NE(req, nullptr);
+  EXPECT_EQ(req->getPayloadType(), PAYLOAD_TYPE_CONTROL);
+
+  Packet p;
+  copyRaw(req, &p);
+  rx.recv(&p);
+  EXPECT_EQ(rx.requests, 1);
+
+  Packet* reply = mgr.getNextOutbound(100000);
+  ASSERT_NE(reply, nullptr);
+  EXPECT_EQ(reply->getPayloadType(), PAYLOAD_TYPE_CONTROL);
+  EXPECT_FALSE(reply->shadow_wrapped);
+}
+
+TEST(ShadowNode, WrappedControlReplyIsWrapped) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode tx(sender.self_id, rng);
+  tx.setEnabled(true);
+  sender.setShadowSendHook(&tx);
+
+  SimpleMeshTables rx_tables;
+  ControlTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  setTestPubKey(rx, 0xA0);
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(false);
+  rx.setShadowSendHook(&rx_node);
+  rx.setShadowRecvHook(&rx_node);
+
+  Packet* req = makeControlOutbound(sender, mgr, 0x80);
+  ASSERT_NE(req, nullptr);
+  EXPECT_EQ(req->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+
+  Packet p;
+  copyRaw(req, &p);
+  rx.recv(&p);
+  EXPECT_EQ(rx.requests, 1);
+
+  Packet* reply = mgr.getNextOutbound(100000);
+  ASSERT_NE(reply, nullptr);
+  EXPECT_EQ(reply->getPayloadType(), PAYLOAD_TYPE_GRP_TXT);
+  EXPECT_TRUE(reply->shadow_wrapped);
+  ASSERT_GT(reply->payload_len, SHADOW_COMMON_SIZE);
+  EXPECT_EQ(reply->payload[SHADOW_COMMON_SIZE], PAYLOAD_TYPE_CONTROL);
+}
+
+TEST(ShadowNode, WrappedControlWithPathIsDropped) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh sender(radio, clock, rng, rtc, mgr, tables);
+  ShadowNode tx(sender.self_id, rng);
+  tx.setEnabled(true);
+  sender.setShadowSendHook(&tx);
+
+  SimpleMeshTables rx_tables;
+  ControlTestMesh rx(radio, clock, rng, rtc, mgr, rx_tables);
+  setTestPubKey(rx, 0xA0);
+  ShadowNode rx_node(rx.self_id, rng);
+  rx_node.setEnabled(true);
+  rx_node.setUnwrapAll(false);
+  rx.reply = false;
+  rx.setShadowSendHook(&rx_node);
+  rx.setShadowRecvHook(&rx_node);
+
+  Packet* out = makeControlOutbound(sender, mgr, 0x80);
+  ASSERT_NE(out, nullptr);
+
+  Packet p;
+  copyRaw(out, &p);
+  p.path_len = 1;          // non-zero-hop CONTROL must never transit
+  p.path[0] = 0x42;
+
+  rx.recv(&p);
+  EXPECT_EQ(rx.requests, 0);
+  EXPECT_EQ(p.getPayloadType(), PAYLOAD_TYPE_GRP_TXT);   // not unwrapped
 }
 
 int main(int argc, char** argv) {
