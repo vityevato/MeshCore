@@ -493,7 +493,7 @@ void SensorMesh::handleCommand(ClientInfo* from, uint32_t sender_timestamp, char
 
       Serial.printf("%02X ", c->permissions);
       mesh::Utils::printHex(Serial, c->id.pub_key, PUB_KEY_SIZE);
-      Serial.printf("\n");
+      Serial.println();
     }
     reply[0] = 0;
   } else if (memcmp(command, "io ", 2) == 0) { // io {value}: write, io: read 

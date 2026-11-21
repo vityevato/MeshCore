@@ -1331,11 +1331,19 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
 
   // shadow transit auth CLI
   if (strncmp(command, "shd.", 4) == 0) {
+    // ignore trailing spaces so `shd.list ` behaves like `shd.list`
+    size_t cmd_len = strlen(command);
+    while (cmd_len > 0 && command[cmd_len - 1] == ' ') command[--cmd_len] = 0;
+
     if (sender_timestamp == 0 && strcmp(command, "shd.list") == 0) {
-      Serial.printf("SHADOW ACL (%d):\n", shadow_auth.getNumAllowed());
-      for (int i = 0; i < shadow_auth.getNumAllowed(); i++) {
+      int num_allowed = shadow_auth.getNumAllowed();
+      // Serial.println() emits CRLF, which the web flasher console needs to
+      // display the listing without waiting for the next command.
+      Serial.printf("SHADOW ACL (%d):", num_allowed);
+      Serial.println();
+      for (int i = 0; i < num_allowed; i++) {
         mesh::Utils::printHex(Serial, shadow_auth.getAllowedKey(i), PUB_KEY_SIZE);
-        Serial.printf("\n");
+        Serial.println();
       }
       reply[0] = 0;
       return;
@@ -1381,7 +1389,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
 
       Serial.printf("%02X ", c->permissions);
       mesh::Utils::printHex(Serial, c->id.pub_key, PUB_KEY_SIZE);
-      Serial.printf("\n");
+      Serial.println();
     }
     reply[0] = 0;
   } else if (memcmp(command, "discover.neighbors", 18) == 0) {

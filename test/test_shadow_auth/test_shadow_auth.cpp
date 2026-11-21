@@ -546,6 +546,23 @@ TEST(ShadowAuth, StatsCommandReportsCounters) {
   EXPECT_NE(strstr(buf, "evict=0"), nullptr);
 }
 
+TEST(ShadowAuth, ListCommandReportsKeyCount) {
+  TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc;
+  TestPacketManager mgr; SimpleMeshTables tables;
+  TestMesh mesh(radio, clock, rng, rtc, mgr, tables);
+
+  ShadowAuth auth;
+  auth.begin();
+
+  uint8_t pub[PUB_KEY_SIZE];
+  memset(pub, 0x42, sizeof(pub));
+  ASSERT_TRUE(auth.allow(pub));
+
+  char buf[160];
+  ASSERT_TRUE(auth.handleCommand(mesh, "shd.list", buf, sizeof(buf)));
+  EXPECT_STREQ("1 keys", buf);
+}
+
 TEST(ShadowAuth, TagCollisionTriesAllCandidates) {
   TestRadio radio; TestClock clock; TestRng rng; TestRtc rtc; TestPacketManager mgr; SimpleMeshTables tables;
   TestMesh mesh(radio, clock, rng, rtc, mgr, tables);

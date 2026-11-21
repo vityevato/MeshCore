@@ -870,7 +870,13 @@ evict=...`.
 `pubkey-hex` is the full 32-byte public key (64 hex characters). The normal
 profile stores up to 128 keys (32 with the low-memory profile). When the list
 is full, `shd.allow` returns `Err - allowlist full`; remove entries with
-`shd.remove`. `shd.list` prints the keys on the local serial console.
+`shd.remove`.
+
+On a repeater, `shd.list` prints the full allowlist only on the device's local
+serial console: a `SHADOW ACL (<n>):` header followed by one 64-character hex
+key per line. When sent over the mesh by an ACL admin, it returns only `<n>
+keys`; the keys themselves are not transmitted, because the CLI reply is
+limited to 160 bytes.
 
 ---
 

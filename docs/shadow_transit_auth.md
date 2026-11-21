@@ -206,6 +206,10 @@ shd.remove <pubkey-hex>
 shd.list
 ```
 
+On a repeater, `shd.list` prints the full allowlist only on the local serial
+console. When sent over the mesh by an ACL admin, it returns only the key
+count (`<n> keys`); the keys themselves are not transmitted.
+
 Node / companion:
 
 ```text

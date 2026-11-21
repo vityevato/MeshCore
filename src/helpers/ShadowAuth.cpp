@@ -1112,6 +1112,8 @@ bool ShadowAuth::handleCommand(mesh::Mesh& mesh, const char* command, char* repl
     return true;
   }
   if (strcmp(name, "shd.list") == 0) {
+    // The full listing is printed only by the local serial CLI; a mesh reply
+    // is too small to carry the whole allowlist.
     snprintf(reply, reply_len, "%d keys", getNumAllowed());
     return true;
   }
