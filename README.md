@@ -2,6 +2,8 @@
 
 MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.
 
+**This fork adds Shadow Transit Auth:** an optional overlay that lets repeaters forward only traffic whose source proves possession of an allowlisted Ed25519 key — per-source authorization with no shared network key and no wire-protocol change, so legacy repeaters keep relaying it as ordinary group traffic. See [details below](#-shadow-transit-auth-optional-overlay).
+
 ## 🔍 What is MeshCore?
 
 MeshCore now supports a range of LoRa devices, allowing for easy flashing without the need to compile firmware manually. Users can flash a pre-built binary using tools like Adafruit ESPTool and interact with the network through a serial console.
@@ -17,7 +19,15 @@ MeshCore provides the ability to create wireless mesh networks, similar to Mesht
 * Decentralized & Resilient – No central server or internet required; the network is self-healing.
 * Low Power Consumption – Ideal for battery-powered or solar-powered devices.
 * Simple to Deploy – Pre-built example applications make it easy to get started.
-* Optional Shadow Transit Auth (Companion and Repeater firmware) – Repeaters can forward only traffic from allowlisted node keys, without changing the wire protocol for old repeaters. ([docs](./docs/shadow_transit_auth.md))
+* **Shadow Transit Auth (optional)** – repeaters can forward only traffic from allowlisted Ed25519 keys; no shared network key, no protocol change. ([docs](./docs/shadow_transit_auth.md))
+
+## 🔐 Shadow Transit Auth (optional overlay)
+
+Repeaters can forward only traffic whose source proves possession of an allowlisted Ed25519 key — per-source authorization with no shared network key and no change to the wire protocol. The overlay rides inside ordinary `GRP_TXT` v1, so legacy repeaters keep forwarding it as normal group traffic, and it can be rolled out one node at a time.
+
+Enforcement is opt-in (`shd.enforce`, default off). When it is on, the repeater verifies signatures before a packet enters the delayed inbound queue, drops unlisted transit traffic, keeps rate-limited `ANON_REQ` login reachable, and accepts adverts from unknown keys only with `shd.allow.advert on`.
+
+See [docs/shadow_transit_auth.md](./docs/shadow_transit_auth.md) for the envelope, modes and policy details, and [CLI commands](./docs/cli_commands.md#shadow-transit-auth) for the `shd.*` settings.
 
 ## 🎯 What Can You Use MeshCore For?
 
